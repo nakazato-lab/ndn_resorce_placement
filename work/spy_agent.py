@@ -52,24 +52,26 @@ def on_spy_interest(name, interest_param, app_param):
         }
         app.put_data(name, content=json.dumps(payload).encode('utf-8'), freshness_period=1)
 
-    elif operation == 'create_child':
-        # 子コンテナ生成ロジック (docker-py使用)
-        child_name = name_str_list[3]
-        cpu_shares = int(name_str_list[4])
-        mem_limit = name_str_list[5]
+    
+    # elif operation == 'create_child':
+    #     # 子コンテナ生成ロジック (docker-py使用)
+    #     child_name = name_str_list[3]
+    #     cpu_shares = int(name_str_list[4])
+    #     mem_limit = name_str_list[5]
 
-        try:
-            client = docker.from_env()
-            container = client.containers.run(
-                image="dockerprac-ndn-worker-task",
-                name=child_name,
-                detach=True,
-                cpu_shares=cpu_shares,
-                mem_limit=mem_limit
-            )
-            app.put_data(name, content=f"Created {child_name}".encode(), freshness_period=1)
-        except Exception as e:
-            app.put_data(name, content=str(e).encode(), freshness_period=1)
+    #     try:
+    #         client = docker.from_env()
+    #         container = client.containers.run(
+    #             image="dockerprac-ndn-worker-task",
+    #             name=child_name,
+    #             detach=True,
+    #             cpu_shares=cpu_shares,
+    #             mem_limit=mem_limit
+    #         )
+    #         app.put_data(name, content=f"Created {child_name}".encode(), freshness_period=1)
+    #     except Exception as e:
+    #         app.put_data(name, content=str(e).encode(), freshness_period=1)
+
 
 async def main():
     logging.info(f"Spy process started on {MY_NODE_NAME}")

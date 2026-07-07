@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spy
+  namespace: default
+  labels:
+    app: spy
+spec:
+  selector:
+    matchLabels:
+      app: spy
+  template:
+    metadata:
+      labels:
+        app: spy
+    spec:
+      containers:
+      - name: spy
+        image: your-registry/spy:latest # ご自身のビルドしたイメージ名に変更してください
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true # 💡 図の要件通り「特権コンテナ」に設定
+        env:
+        # 💡 K8sの「Downward API」を使い、実行されているノードの名前を動的に取得
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        # ノード固有の静的情報は、本来はConfigMap等に分けるのが理想ですが、
+        # いったん環境変数としてここに直接記述できるようにしています。
+        - name: CPU_MODEL
+          value: "Intel Core i7-2026"
+        - name: PASSMARK
+          value: "12000"
+        - name: MAX_MEM
+          value: "4096"
+        # 💡 psutilが「コンテナ内」ではなく「ホスト(ノード)全体」の数値を読めるようにするための環境変数
+        - name: PROCFS_PATH
+          value: /host/proc
+        volumeMounts:
+        - name: host-proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: host-sys
+          mountPath: /host/sys
+          readOnly: true
+      volumes:
+      # ホストノードの /proc と /sys をマウントしてリソースを正確に監視できるようにする
+      - name: host-proc
+        hostPath:
+          path: /proc
+      - name: host-sys
+        hostPath:
+          path: /sys
