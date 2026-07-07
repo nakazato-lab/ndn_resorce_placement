@@ -1,5 +1,5 @@
 apiVersion: apps/v1
-kind: DaemonSet
+kind: spy-DaemonSet
 metadata:
   name: spy
   namespace: default
@@ -14,41 +14,37 @@ spec:
       labels:
         app: spy
     spec:
+      # 💡 spy-rbac.yaml で作成するServiceAccountをここで紐付け
+      serviceAccountName: spy-service-account
+      
+      # 💡 NFDの起動（ソケットファイルの生成）を待つInitContainer
+      initContainers:
+      - name: wait-for-nfd
+        image: busybox:1.36
+        imagePullPolicy: IfNotPresent
+        command: ['sh', '-c', 'until [ -S /var/run/nfd/nfd.sock ]; do echo "waiting for nfd.sock..."; sleep 2; done']
+        volumeMounts:
+        - name: nfd-socket-dir
+          mountPath: /var/run/nfd
+          
       containers:
       - name: spy
-        image: your-registry/spy:latest # ご自身のビルドしたイメージ名に変更してください
+        image: <あなたのレジストリ名>/ndn-spy:latest # ビルドしたイメージを指定
         imagePullPolicy: IfNotPresent
         securityContext:
-          privileged: true # 💡 図の要件通り「特権コンテナ」に設定
+          privileged: true
         env:
-        # 💡 K8sの「Downward API」を使い、実行されているノードの名前を動的に取得
         - name: NODE_NAME
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
-        # ノード固有の静的情報は、本来はConfigMap等に分けるのが理想ですが、
-        # いったん環境変数としてここに直接記述できるようにしています。
-        - name: CPU_MODEL
-          value: "Intel Core i7-2026"
-        - name: PASSMARK
-          value: "12000"
-        - name: MAX_MEM
-          value: "4096"
-        # 💡 psutilが「コンテナ内」ではなく「ホスト(ノード)全体」の数値を読めるようにするための環境変数
-        - name: PROCFS_PATH
-          value: /host/proc
         volumeMounts:
-        - name: host-proc
-          mountPath: /host/proc
-          readOnly: true
-        - name: host-sys
-          mountPath: /host/sys
-          readOnly: true
+        - name: nfd-socket-dir
+          mountPath: /var/run/nfd # Python-NDNがNFDと通信するためのマウントパス
+      
       volumes:
-      # ホストノードの /proc と /sys をマウントしてリソースを正確に監視できるようにする
-      - name: host-proc
+      # 💡 seed.yamlの運用に合わせたNFDソケット用のVolume設定
+      - name: nfd-socket-dir
         hostPath:
-          path: /proc
-      - name: host-sys
-        hostPath:
-          path: /sys
+          path: /var/run/nfd-k8s # ホスト側のパス（NFDがソケットを出力する場所）
+          type: DirectoryOrCreate
