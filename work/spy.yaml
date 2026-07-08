@@ -1,7 +1,7 @@
 apiVersion: apps/v1
-kind: spy-DaemonSet
+kind: DaemonSet  # 💡 spy-DaemonSet から修正
 metadata:
-  name: spy
+  name: spy-daemonset
   namespace: default
   labels:
     app: spy
@@ -14,7 +14,6 @@ spec:
       labels:
         app: spy
     spec:
-      # 💡 spy-rbac.yaml で作成するServiceAccountをここで紐付け
       serviceAccountName: spy-service-account
       
       # 💡 NFDの起動（ソケットファイルの生成）を待つInitContainer
@@ -29,10 +28,8 @@ spec:
           
       containers:
       - name: spy
-        image: <あなたのレジストリ名>/ndn-spy:latest # ビルドしたイメージを指定
+        image: <あなたのレジストリ名>/ndn-spy:latest 
         imagePullPolicy: IfNotPresent
-        securityContext:
-          privileged: true
         env:
         - name: NODE_NAME
           valueFrom:
@@ -40,11 +37,11 @@ spec:
               fieldPath: spec.nodeName
         volumeMounts:
         - name: nfd-socket-dir
-          mountPath: /var/run/nfd # Python-NDNがNFDと通信するためのマウントパス
+          mountPath: /var/run/nfd 
       
       volumes:
-      # 💡 seed.yamlの運用に合わせたNFDソケット用のVolume設定
       - name: nfd-socket-dir
         hostPath:
-          path: /var/run/nfd-k8s # ホスト側のパス（NFDがソケットを出力する場所）
+          # 💡 実験環境のNFDポッドがホスト側に公開しているソケットのパスと必ず一致させてください
+          path: /var/run/nfd-k8s 
           type: DirectoryOrCreate
