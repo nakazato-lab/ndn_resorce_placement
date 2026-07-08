@@ -25,7 +25,6 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: spy-service-account
-    namespace: default
 roleRef:
   kind: ClusterRole
   name: spy-role
