@@ -33,7 +33,7 @@ spec:
           
       containers:
       - name: spy
-        image: <あなたのレジストリ名>/ndn-spy:latest #コンテナイメージを書く
+        image: <あなたのレジストリ名>/ndn-spy:latest #コンテナイメージを書く、コンテナの中にspy.pyの実行を組み込む
         imagePullPolicy: IfNotPresent
         env:
         - name: NODE_NAME
