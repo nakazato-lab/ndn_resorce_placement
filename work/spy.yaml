@@ -16,19 +16,24 @@ spec:
     spec:
       serviceAccountName: spy-service-account
       
-      # 💡 NFDの起動（ソケットファイルの生成）を待つInitContainer
+      # 💡 メインコンテナが動く前に、指定したNFD（TCP:6363）が立ち上がるのを待つ
       initContainers:
-      - name: wait-for-nfd
+      - name: wait-for-nfd-tcp
         image: busybox:1.36
         imagePullPolicy: IfNotPresent
-        command: ['sh', '-c', 'until [ -S /var/run/nfd/nfd.sock ]; do echo "waiting for nfd.sock..."; sleep 2; done']
-        volumeMounts:
-        - name: nfd-socket-dir
-          mountPath: /var/run/nfd
+        # nc (netcat) コマンドを使い、NFDのIPとポートに対して疎通が取れるまで2秒おきにチェック
+        command: 
+        - 'sh'
+        - '-c'
+        - 'until nc -zvw3 $NFD_IP 6363; do echo "waiting for NFD at $NFD_IP:6363..."; sleep 2; done' # 6363は適宜変更
+        env:
+        - name: NFD_IP
+          # ★ここに「通知されたNFDのIPアドレス」や「NFDのService名」
+          value: "nfd-service.ndn.svc.cluster.local"
           
       containers:
       - name: spy
-        image: <あなたのレジストリ名>/ndn-spy:latest 
+        image: <あなたのレジストリ名>/ndn-spy:latest #コンテナイメージを書く
         imagePullPolicy: IfNotPresent
         env:
         - name: NODE_NAME
@@ -39,9 +44,3 @@ spec:
         - name: nfd-socket-dir
           mountPath: /var/run/nfd 
       
-      volumes:
-      - name: nfd-socket-dir
-        hostPath:
-          # 💡 実験環境のNFDポッドがホスト側に公開しているソケットのパスと必ず一致させてください
-          path: /var/run/nfd-k8s 
-          type: DirectoryOrCreate
