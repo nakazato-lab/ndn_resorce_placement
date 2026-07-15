@@ -16,31 +16,59 @@ spec:
     spec:
       serviceAccountName: spy-service-account
       
-      # 💡 メインコンテナが動く前に、指定したNFD（TCP:6363）が立ち上がるのを待つ
+      # =========================================================
+      # 1. 初期化コンテナ（NFDのIP取得 ＆ 起動待ち）
+      # =========================================================
       initContainers:
-      - name: wait-for-nfd-tcp
+      - name: wait-nfd-
         image: busybox:1.36
         imagePullPolicy: IfNotPresent
-        # nc (netcat) コマンドを使い、NFDのIPとポートに対して疎通が取れるまで2秒おきにチェック
         command: 
         - 'sh'
         - '-c'
-        - 'until nc -zvw3 $NFD_IP 6363; do echo "waiting for NFD at $NFD_IP:6363..."; sleep 2; done' # 6363は適宜変更
-        env:
-        - name: NFD_IP
-          # ★ここに「通知されたNFDのIPアドレス」や「NFDのService名」
-          value: "nfd-service.ndn.svc.cluster.local"
+        - |
+          until [ -f /etc/ndn-config/nfd-ip ]; do 
+            echo "waiting for nfd-config file to be mounted..."
+            sleep 2
+          done
+          
+          NFD_IP=$(cat /etc/ndn-config/nfd-ip)
+          echo "Target NFD IP found: $NFD_IP"
+          
+          until nc -zvw3 "$NFD_IP" 6363; do
+            echo "waiting for NFD at $NFD_IP:6363..."
+            sleep 2
+          done
+        volumeMounts:
+        - name: nfd-endpoint
+          mountPath: /etc/ndn-config
+          readOnly: true
           
       containers:
       - name: spy
         image: <あなたのレジストリ名>/ndn-spy:latest #コンテナイメージを書く、コンテナの中にspy.pyの実行を組み込む
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         env:
         - name: NODE_NAME
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
         volumeMounts:
-        - name: nfd-socket-dir
-          mountPath: /var/run/nfd 
-      
+        - name: nfd-endpoint
+          mountPath: /etc/ndn-config
+          readOnly: true
+        # ホストノード自体のリソース（CPU/メモリ）を取得するためにマウント
+        - name: host-proc
+          mountPath: /host/proc
+          readOnly: true
+
+      volumes:
+      # NFDのIPが格納されているConfigMap
+      - name: nfd-endpoint
+        configMap:
+          name: nfd-config
+          optional: true
+      # ノード物理マシンのリソース情報を覗くためのホストパス
+      - name: host-proc
+        hostPath:
+          path: /proc
