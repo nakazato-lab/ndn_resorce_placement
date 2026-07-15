@@ -1,81 +1,86 @@
 import os
-import sys
 import json
 import logging
 import asyncio
 import psutil
-import docker
 from ndn.app import NDNApp
 from ndn.encoding import Name, Component
+from ndn.transport.tcp_transport import TcpTransport
+from ndn.app_support.nfd_mgmt import make_command, ControlParameters, ControlResponse
 
 # ロギング設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-app = NDNApp()
-
-# 静的情報の取得
 MY_NODE_NAME = os.environ.get("NODE_NAME", "producer_1")
-CPU_MODEL = os.environ.get("CPU_MODEL", "Intel Core i7-2026")
-PASSMARK = int(os.environ.get("PASSMARK", "12000"))
-MAX_MEM = int(os.environ.get("MAX_MEM", "4096"))  # MB単位
+# 指定のInterest形式: /MY_NODE_NAME/spy/
+PREFIX = f"/{MY_NODE_NAME}/spy"
 
-def get_dynamic_resource():
-    """
-    親コンテナ（自身）の動的リソース情報を取得
-    """
-    # CPU使用率 (interval=0.1 で短い期間の平均をとる)
-    cpu_usage = psutil.cpu_percent(interval=0.1)
-    
-    # メモリ使用率 (親コンテナのメモリ使用量を推定)
-    mem = psutil.virtual_memory()
-    mem_usage = mem.percent
-    
-    return cpu_usage, mem_usage
+# NFD接続設定
+CONFIG_PATH = "/etc/ndn-config/ADDRESS"
+NFD_IP = None
+if os.path.exists(CONFIG_PATH):
+    with open(CONFIG_PATH, "r") as f:
+        NFD_IP = f.read().strip()
 
-@app.route(f'/spy/{MY_NODE_NAME}')
-def on_spy_interest(name, interest_param, app_param):
-    name_str_list = [Component.to_str(c) for c in name]
-    operation = name_str_list[2] if len(name_str_list) > 2 else ""
+# Appインスタンス作成
+if NFD_IP and NFD_IP != "not available yet":
+    logging.info(f"Connecting to NFD via TCP: {NFD_IP}")
+    app = NDNApp(transport=TcpTransport(NFD_IP, 6363))
+else:
+    logging.info("Connecting to NFD via local UNIX socket")
+    app = NDNApp()
 
-    if operation == 'resource':
-        cpu, mem = get_dynamic_resource()
-        
-        # スコア計算
-        availability = (100.0 - cpu) / 100.0
-        score = int(PASSMARK * availability)
-        
-        payload = {
-            "node_name": MY_NODE_NAME,
-            "cpu_usage": f"{cpu}%",
-            "memory_usage": f"{mem}%",
-            "score": score
-        }
-        app.put_data(name, content=json.dumps(payload).encode('utf-8'), freshness_period=1)
+# ホストのリソース取得用パス設定
+if os.path.exists("/host/proc"):
+    os.environ["PROCFS_PATH"] = "/host/proc"
 
-    
-    # elif operation == 'create_child':
-    #     # 子コンテナ生成ロジック (docker-py使用)
-    #     child_name = name_str_list[3]
-    #     cpu_shares = int(name_str_list[4])
-    #     mem_limit = name_str_list[5]
+def get_resource_payload():
+    cpu = psutil.cpu_percent(interval=0.1)
+    mem = psutil.virtual_memory().percent
+    return json.dumps({
+        "node_name": MY_NODE_NAME,
+        "cpu_usage": f"{cpu}%",
+        "memory_usage": f"{mem}%",
+        "score": int(12000 * ((100.0 - cpu) / 100.0))
+    }).encode('utf-8')
 
-    #     try:
-    #         client = docker.from_env()
-    #         container = client.containers.run(
-    #             image="dockerprac-ndn-worker-task",
-    #             name=child_name,
-    #             detach=True,
-    #             cpu_shares=cpu_shares,
-    #             mem_limit=mem_limit
-    #         )
-    #         app.put_data(name, content=f"Created {child_name}".encode(), freshness_period=1)
-    #     except Exception as e:
-    #         app.put_data(name, content=str(e).encode(), freshness_period=1)
+# Interestハンドラ: /{NODE_NAME}/spy/resource などを処理
+@app.route(PREFIX)
+def on_interest(name, interest_param, app_param):
+    # 名前の末尾が 'resource' かどうかで判定
+    if Component.to_str(name[-1]) == 'resource':
+        payload = get_resource_payload()
+        app.put_data(name, content=payload, freshness_period=1000)
 
+async def register_remote_prefix(app: NDNApp, prefix_str: str):
+    """リモート登録用: /localhop/nfd/rib/register を使用"""
+    topic = Name.from_str('/localhop/nfd/rib/register')
+    params = ControlParameters()
+    params.name = Name.from_str(prefix_str)
+    params.face_id = 0  # 自身のFace
+    params.origin = 65
+    params.cost = 0
+    params.flags = 1
+
+    signer = app.keychain.get_signer({})
+    interest_name = make_command(topic, params, signer=signer)
+
+    try:
+        _, _, content = await app.express_interest(interest_name, lifetime=4000)
+        response = ControlResponse.parse(content)
+        if response.status_code in (200, 214):
+            logging.info(f"Successfully registered: {prefix_str}")
+        else:
+            logging.error(f"Registration failed: {response.status_text}")
+    except Exception as e:
+        logging.error(f"Registration error: {e}")
 
 async def main():
-    logging.info(f"Spy process started on {MY_NODE_NAME}")
-    await app.main_loop()
+    await app.face.open()
+    # 登録処理
+    await register_remote_prefix(app, PREFIX)
+    # 待機ループ
+    await app.face.run()
 
 if __name__ == '__main__':
     asyncio.run(main())
