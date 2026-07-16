@@ -25,7 +25,7 @@ if os.path.exists(CONFIG_PATH):
 # Appインスタンス作成
 if NFD_IP and NFD_IP != "not available yet":
     logging.info(f"Connecting to NFD via TCP: {NFD_IP}")
-    app = NDNApp(transport=TcpTransport(NFD_IP, 6363))
+    app = NDNApp(transport=TcpTransport(NFD_IP, 6363))# NFD_IPに6363も含まれているから分離しないといけない
 else:
     logging.info("Connecting to NFD via local UNIX socket")
     app = NDNApp()

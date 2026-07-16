@@ -1,0 +1,25 @@
+#Dockerfile.spy
+# 1. 軽量なPython公式イメージをベースにする
+FROM python:3.10-slim
+
+# 2. コンテナ内の作業ディレクトリを設定
+WORKDIR /app
+
+# 3. psutilのビルドやdockerコマンドに必要な最小限の依存パッケージをインストール
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 4. 必要なPythonライブラリをインストール
+# ※ python-ndn, psutil, docker-py をまとめて導入
+RUN pip install --no-cache-dir \
+    python-ndn \
+    psutil \
+    docker
+
+# 5. 修正した spy.py をコンテナ内にコピー
+COPY spy.py .
+
+# 6. コンテナ起動時にプログラムを実行するコマンドを指定
+CMD ["python", "spy.py"]
