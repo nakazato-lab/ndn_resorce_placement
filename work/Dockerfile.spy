@@ -1,25 +1,39 @@
-#Dockerfile.spy
-# 1. 軽量なPython公式イメージをベースにする
-FROM python:3.10-slim
+# 汎用的でツールが豊富な標準の Python 3.10 イメージを使用
+FROM python:3.10
 
-# 2. コンテナ内の作業ディレクトリを設定
+# 3. インタラクティブなプロンプトを無効化
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
-# 3. psutilのビルドやdockerコマンドに必要な最小限の依存パッケージをインストール
+# テスト・デバッグに便利なツール群をインストール
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    python3-dev \
+    curl \
+    iputils-ping \
+    netcat-openbsd \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
-# 4. 必要なPythonライブラリをインストール
-# ※ python-ndn, psutil, docker-py をまとめて導入
-RUN pip install --no-cache-dir \
-    python-ndn \
-    psutil \
-    docker
+# Spyに必要なPythonパッケージのインストール (リソース取得用のpsutil)
+RUN pip install --no-cache-dir python-ndn psutil
 
-# 5. 修正した spy.py をコンテナ内にコピー
-COPY spy.py .
+# プログラムのコピー
+COPY spy/spy_agent.py /app/
 
-# 6. コンテナ起動時にプログラムを実行するコマンドを指定
-CMD ["python", "spy.py"]
+# 2. 起動コマンド: NFDの準備ができるまで待機してからSpyを起動
+# (Managerと同じ待機ロジック)
+CMD ["/bin/bash", "-c", "\
+    echo 'Waiting for NFD endpoint configuration...'; \
+    while [ ! -f /etc/ndn-config/ADDRESS ] || [ \"$(cat /etc/ndn-config/ADDRESS)\" = \"not available yet\" ]; do \
+        sleep 2; \
+    done; \
+    NFD_IP=$(cat /etc/ndn-config/ADDRESS | cut -d':' -f1); \
+    echo \"Found NFD IP: $NFD_IP. Waiting for NFD to open port 6363...\"; \
+    while ! nc -z $NFD_IP 6363; do \
+        sleep 2; \
+    done; \
+    echo 'NFD is ready! Starting Spy...'; \
+    python spy_agent.py \
+"]

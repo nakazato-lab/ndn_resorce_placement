@@ -51,7 +51,7 @@ spec:
           
       containers:
       - name: spy
-        image: <あなたのレジストリ名>/ndn-spy:latest #コンテナイメージを書く、コンテナの中にspy.pyの実行を組み込む
+        image: tmkmzk/ndn-spy:latest 
         imagePullPolicy: Always
         env:
         - name: NODE_NAME
