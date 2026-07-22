@@ -5,7 +5,7 @@ import asyncio
 import psutil
 from ndn.app import NDNApp
 from ndn.encoding import Name, Component
-from ndn.transport.tcp_transport import TcpTransport
+from ndn.transport.stream_face import TcpFace
 from ndn.app_support.nfd_mgmt import make_command, ControlParameters, ControlResponse
 
 # ロギング設定
@@ -24,8 +24,14 @@ if os.path.exists(CONFIG_PATH):
 
 # Appインスタンス作成
 if NFD_IP and NFD_IP != "not available yet":
-    logging.info(f"Connecting to NFD via TCP: {NFD_IP}")
-    app = NDNApp(transport=TcpTransport(NFD_IP, 6363))# NFD_IPに6363も含まれているから分離しないといけない
+    if ":" in NFD_IP:
+        host, port_str = NFD_IP.split(":", 1)
+        port = int(port_str)
+    else:
+        host = NFD_IP
+        port = 6363
+    logging.info(f"Connecting to NFD via TCP: {host}:{port}")
+    app = NDNApp(face=TcpFace(host, port))
 else:
     logging.info("Connecting to NFD via local UNIX socket")
     app = NDNApp()

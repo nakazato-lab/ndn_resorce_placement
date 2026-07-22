@@ -21,3 +21,5 @@ node_db.jsonについて
 
 #　個人メモ
 ・同期関数の中で非同期処理を行いたいのであれば、同期関数内に直接核と衝突が起きてタイムアウトしてしまうので、同期関数の中で別のタスクとして呼び出す方法をとらないといけない。
+・ssh vmで対象の環境に飛べる。
+・鍵とかの設定はssh-keygen -t ed25519で作ったところにGet-Content ~/.ssh/id_ed25519.pub | ssh 飛び先や踏み台の名前 "mkdir -p ~/.ssh; chmod 700 ~/.ssh; cat >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys"
