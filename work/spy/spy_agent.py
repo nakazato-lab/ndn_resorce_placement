@@ -7,6 +7,7 @@ from ndn.app import NDNApp
 from ndn.encoding import Name, Component
 from ndn.transport.stream_face import TcpFace
 from ndn.app_support.nfd_mgmt import make_command, ControlParameters, ControlResponse
+from ndn.security import KeychainDigest
 
 # ロギング設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -31,10 +32,10 @@ if NFD_ADDR and NFD_ADDR != "not available yet":
         host = NFD_ADDR
         port = 6363
     logging.info(f"Connecting to NFD via TCP: {host}:{port}")
-    app = NDNApp(face=TcpFace(host, port))
+    app = NDNApp(face=TcpFace(host, port), keychain=KeychainDigest())
 else:
     logging.info("Connecting to NFD via local UNIX socket")
-    app = NDNApp()
+    app = NDNApp(keychain=KeychainDigest())
 
 # ホストのリソース取得用パス設定
 if os.path.exists("/host/proc"):
