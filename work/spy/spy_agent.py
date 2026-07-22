@@ -17,18 +17,18 @@ PREFIX = f"/{MY_NODE_NAME}/spy"
 
 # NFD接続設定
 CONFIG_PATH = "/etc/ndn-config/ADDRESS"
-NFD_IP = None
+NFD_ADDR = None
 if os.path.exists(CONFIG_PATH):
     with open(CONFIG_PATH, "r") as f:
-        NFD_IP = f.read().strip()
+        NFD_ADDR = f.read().strip()
 
 # Appインスタンス作成
-if NFD_IP and NFD_IP != "not available yet":
-    if ":" in NFD_IP:
-        host, port_str = NFD_IP.split(":", 1)
+if NFD_ADDR and NFD_ADDR != "not available yet":
+    if ":" in NFD_ADDR:
+        host, port_str = NFD_ADDR.split(":", 1)
         port = int(port_str)
     else:
-        host = NFD_IP
+        host = NFD_ADDR
         port = 6363
     logging.info(f"Connecting to NFD via TCP: {host}:{port}")
     app = NDNApp(face=TcpFace(host, port))
