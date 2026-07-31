@@ -1,234 +1,194 @@
-from typing import Callable, Optional
-from ndn.app import NDNApp
-from ndn.encoding import Name, InterestParam, BinaryStr, FormalName, MetaInfo
 import os
 import json
+import logging
 import asyncio
 from datetime import datetime
 
-from lib.ndn_utils import send_interest, send_interest_with_params
+from kubernetes import client, config
+from ndn.app import NDNApp
+from ndn.encoding import Name
+from ndn.transport.stream_face import TcpFace
+from ndn.app_support.nfd_mgmt import make_command, ControlParameters, ControlResponse
+from ndn.security import KeychainDigest
 
-class Manager:
-    def __init__(self):
-        self.app = NDNApp()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
+PREFIX = "/Manager"
+DB_FILENAME = "/data/node_db.json"
+
+# 1. NFD_ADDRの取得とポート分割処理
+CONFIG_PATH = "/etc/ndn-config/ADDRESS"
+NFD_ADDR = None
+
+if os.path.exists(CONFIG_PATH):
+    with open(CONFIG_PATH, "r") as f:
+        NFD_ADDR = f.read().strip()
+
+if NFD_ADDR and NFD_ADDR != "not available yet":
+    if ":" in NFD_ADDR:
+        host, port_str = NFD_ADDR.split(":", 1)
+        port = int(port_str)
+    else:
+        host = NFD_ADDR
+        port = 6363
         
-        # ユーザーごとの静的な所有リソースリスト（既存維持）
-        self.resource_lists = [
-            {"user_id": "userA", "resources": ["/data/profile.txt", "/func/calc_sum"]},
-            {"user_id": "userB", "resources": ["/data/photos/", "/func/get_location"]},
-            {"user_id": "userC", "resources": []}
-        ]
+    logging.info(f"Connecting to NFD via TCP: {host}:{port}")
+    app = NDNApp(face=TcpFace(host, port), keychain=KeychainDigest())
+else:
+    logging.info("Connecting to NFD via local UNIX socket")
+    app = NDNApp(keychain=KeychainDigest())
 
-        self.db_filename = "node_db.json"
 
-    def record_spy_resource(self, spy_json_bytes: bytes):
-        """
-        【ご要望の方針】スパイから（照会などで）聞いた時点での動的リソース状況を
-        node_db.json にタイムスタンプ付きで追記・記録する
-        """
+# 3. スコア計算関数の独立化（簡易計算および手動指定）
+def calculate_score_and_select_node(db_data, target_node=None):
+    """
+    各ノードのリソース情報から最適な配置先を決定する。
+    提案手法が確立するまでは、手動指定またはscoreの最大値に基づく簡易計算を行う。
+    """
+    if not db_data:
+        return None
+
+    # 手動指定がある場合
+    if target_node:
+        for node in db_data:
+            if node.get('node_name') == target_node:
+                logging.info(f"Manual target node selected: {target_node}")
+                return node
+        logging.warning(f"Target node '{target_node}' not found in DB. Falling back to simple calculation.")
+
+    # 簡易的な計算（scoreの最大値を選択）
+    best_node = max(db_data, key=lambda x: x.get('score', 0))
+    logging.info(f"Auto-selected node: {best_node.get('node_name')} (score: {best_node.get('score')})")
+    
+    return best_node
+
+
+def get_k8s_nodes():
+    """Kubernetes APIからクラスター内の全ノード名を取得する"""
+    try:
+        config.load_incluster_config()
+        v1 = client.CoreV1Api()
+        nodes = v1.list_node()
+        return [node.metadata.name for node in nodes.items]
+    except Exception as e:
+        logging.error(f"Failed to get K8s nodes: {e}")
+        return []
+
+
+def on_interest(name, interest_param, app_param):
+    name_str = Name.to_str(name)
+    logging.info(f"Received Interest: {name_str}")
+    
+    # --- .ndn関数の登録要求受付 ---
+    if "register" in name_str:
+        asyncio.create_task(process_register(name, app_param))
+
+
+async def process_register(name, app_param):
+    # 2. 元のプログラムと全く同じエラーハンドリング・パラメータ取得ロジック
+    if not app_param:
+        app.put_data(name, content=b"Error: ApplicationParameters are required", freshness_period=1000)
+        return
+
+    try:
+        req = json.loads(bytes(app_param).decode('utf-8'))
+    except json.JSONDecodeError as e:
+        app.put_data(name, content=f"Error: Invalid JSON ({e})".encode('utf-8'), freshness_period=1000)
+        return
+
+    func_name = req.get("name")
+    content = req.get("content")
+    content_type = req.get("content_type", "ndn")
+    target_node = req.get("target_node")
+
+    if not func_name or not content:
+        app.put_data(name, content=b"Error: 'name' and 'content' are required", freshness_period=1000)
+        return
+
+    # K8sから全ノード名を取得し、Spyへリソース照会
+    node_names = get_k8s_nodes()
+    if not node_names:
+        app.put_data(name, content=b"Error: Cannot find any K8s nodes", freshness_period=1000)
+        return
+
+    db_data = []
+    for node_name in node_names:
+        spy_prefix = f"/{node_name}/spy/resource"
         try:
-            spy_data = json.loads(spy_json_bytes.decode('utf-8'))
+            logging.info(f"Sending Interest to Spy: {spy_prefix}")
+            _, _, spy_content = await app.express_interest(
+                spy_prefix, must_be_fresh=True, can_be_prefix=False, lifetime=2000)
             
-            # スパイのベースコードが返してくれる全パラメーターをそのままマッピング
-            log_entry = {
-                "timestamp": datetime.now().isoformat(),
-                "node_name": spy_data.get("node_name"),
-                "cpu_model": spy_data.get("cpu_model"),
-                "cpu_performance": spy_data.get("cpu_performance"),
-                "gpu_performance": spy_data.get("gpu_performance"),
-                "max_memory": spy_data.get("max_memory"),
-                "cpu_usage": spy_data.get("cpu_usage"),
-                "memory_usage": spy_data.get("memory_usage"),
-                "score_no_tdp": spy_data.get("score_no_tdp"),
-                "score_with_tdp": spy_data.get("score_with_tdp")
-            }
-            
-            data = []
-            if os.path.exists(self.db_filename):
-                try:
-                    with open(self.db_filename, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        if not isinstance(data, list):
-                            data = []
-                except Exception:
-                    data = []
-            
-            data.append(log_entry)
-            with open(self.db_filename, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-                
-            print(f"★ {self.db_filename} にスパイの動的リソースを追記しました: {log_entry['node_name']} (Score: {log_entry['score_no_tdp']})")
-            return "Success"
+            spy_json = json.loads(bytes(spy_content).decode('utf-8'))
+            spy_json['timestamp'] = datetime.now().isoformat()
+            db_data.append(spy_json)
         except Exception as e:
-            print(f"!! スパイデータのパースまたは書き込みに失敗しました: {e}")
-            return "Failed"
+            logging.warning(f"Timeout or Error getting resource from {node_name}: {e}")
 
-    # --- 既存の検索・追加・削除ロジック（そのまま維持） ---
-    def search_user_from_userid(self, user_id : str) -> bool:
-        for user_data in self.resource_lists:
-            if user_data.get("user_id") == user_id: return True
-        return False
-    
-    def search_resource_from_list(self, resource_name : str) -> bool:
-        for user_data in self.resource_lists:
-            if "resources" in user_data and resource_name in user_data["resources"]: return True
-        return False
-    
-    def add_user(self, user_id : str) -> str:
-        if self.search_user_from_userid(user_id): return "Failed"
-        self.resource_lists.append({"user_id": user_id, "resources": []})
-        return "Success"
-    
-    def add_resource_to_user(self, user_id : str, new_resource : str) -> str:
-        for user_data in self.resource_lists:
-            if user_data.get("user_id") == user_id:
-                if new_resource in user_data.get("resources", []): return "Failed"
-                user_data.setdefault("resources", []).append(new_resource)
-                return "Success"
-        return "Failed"
+    os.makedirs(os.path.dirname(DB_FILENAME), exist_ok=True)
+    with open(DB_FILENAME, "w", encoding="utf-8") as f:
+        json.dump(db_data, f, indent=4, ensure_ascii=False)
 
-    def remove_user(self, user_id : str) -> str:
-        for i, user_data in enumerate(self.resource_lists):
-            if user_data.get("user_id") == user_id:
-                del self.resource_lists[i]
-                return "Success"
-        return "Failed"
-    
-    def remove_resource_from_user(self, user_id : str, remove_resource : str) -> str:
-        for user_data in self.resource_lists:
-            if user_data.get("user_id") == user_id:
-                resources = user_data.get("resources", [])
-                if resources and remove_resource in resources:
-                    resources.remove(remove_resource)
-                    return "Success"
-        return "Failed"
+    if not db_data:
+        app.put_data(name, content=b"Error: Failed to collect resources from Spies", freshness_period=1000)
+        return
 
-    def run(self, prefix: str, data_request_handler: Callable[[str], str]):
-        """プレフィックスに対してデータハンドラを登録して起動（同期版）"""
-        # 1. 外部から呼び出される同期関数を登録
-        @self.app.route(prefix)
-        def on_interest(name: FormalName, param: InterestParam, app_param: Optional[BinaryStr]):
-            str_name = Name.to_str(name)
-            print(f'>> I: {str_name}')
-            
-            # 2. 非同期タスクとして処理をキックする
-            # これにより、ライブラリ側は同期的な戻り値(None)を受け取り、警告が出ない
-            asyncio.create_task(self.async_process_interest(name, str_name, app_param))
+    # スコア計算関数を呼び出して最適ノードを決定
+    best_node_info = calculate_score_and_select_node(db_data, target_node)
+    if not best_node_info:
+        app.put_data(name, content=b"Error: Failed to select node", freshness_period=1000)
+        return
 
-        print(f"Manager started on {prefix}")
-        self.app.run_forever()
+    best_node = best_node_info['node_name']
 
-    async def async_process_interest(self, name: FormalName, str_name: str, app_param: Optional[BinaryStr] = None):
-        try:
-            # ここで本来の処理を呼ぶ
-            content = await self.on_interest(str_name, app_param)
-            
-            # 結果の送信
-            self.app.put_data(name, content=content.encode('utf-8'), freshness_period=1)
-            print(f'<< D: {str_name}')
-            print(MetaInfo(freshness_period=10000))
-            print('')
-        except Exception as e:
-            print(f"!! Error in async_process: {e}")
+    # 決定したノードのSeedへCreate Interestを送信
+    seed_prefix = f"/{best_node}/seed/create"
+    forward_params = json.dumps({
+        "type": "CREATE",
+        "name": func_name,
+        "content": content,
+        "content_type": content_type
+    }).encode('utf-8')
 
-    async def on_interest(self, name: str, app_param: Optional[BinaryStr] = None) -> str:
-        """Interest名に基づき、Managerの各種操作にルーティング"""
-        print(f"Processing: {name}")
-        cleaned_name = name.removeprefix('/manager')
-        split_name = cleaned_name.strip('/').split('/') 
+    try:
+        _, _, seed_content = await app.express_interest(
+            seed_prefix, app_param=forward_params, must_be_fresh=True, can_be_prefix=False, lifetime=5000)
+        result_msg = f"Success: Function deployed on {best_node}. Seed response: {bytes(seed_content).decode('utf-8')}"
+    except Exception as e:
+        result_msg = f"Error: Seed deployment failed on {best_node}: {e}"
 
-        if len(split_name) < 2:
-            return "Error: Too few components."
-        
-        operation = split_name[0]     # search, add, delete, create, register
-        target_type = split_name[1]   # user, resource
+    app.put_data(name, content=result_msg.encode('utf-8'), freshness_period=1000)
 
-# --- .ndn関数の登録要求受付 ---
-        # 形式: /manager/register（ペイロードはNameではなくApplicationParametersのJSONに載せる）
-        if operation == 'register':
-            if not app_param:
-                return "Error: REGISTER requires ApplicationParameters"
-            try:
-                req = json.loads(bytes(app_param).decode('utf-8'))
-            except json.JSONDecodeError as e:
-                return f"Error: Invalid JSON in ApplicationParameters ({e})"
 
-            func_name = req.get("name")
-            content = req.get("content")
-            content_type = req.get("content_type", "ndn")
+async def register_remote_prefix(app: NDNApp, prefix_str: str):
+    """リモートのNFDに対して /localhop を使ってプレフィックスを登録する"""
+    topic = Name.from_str('/localhop/nfd/rib/register')
+    params = ControlParameters()
+    params.name = Name.from_str(prefix_str)
+    params.face_id = 0
+    params.origin = 65
+    params.cost = 0
+    params.flags = 1
 
-            if not func_name or not content:
-                return "Error: 'name' and 'content' are required"
+    signer = app.keychain.get_signer({})
+    interest_name = make_command(topic, params, signer=signer)
 
-            # TODO: node_db.jsonのスコアから配置先Seedを選ぶ(_select_seed_node)。今は仮で固定prefixに転送する
-            seed_prefix = "/seed"
-            forward_params = {"type": "CREATE", "name": func_name, "content": content, "content_type": content_type}
-            print(f"-> Redirecting Seed with Interest: {seed_prefix} (name={func_name})")
-            try:
-                seed_content = await send_interest_with_params(self.app, seed_prefix, forward_params)
+    try:
+        _, _, content = await app.express_interest(interest_name, lifetime=4000)
+        response = ControlResponse.parse(content)
+        if response.status_code in (200, 214):
+            logging.info(f"Successfully registered Manager prefix: {prefix_str}")
+        else:
+            logging.error(f"Registration failed: {response.status_text}")
+    except Exception as e:
+        logging.error(f"Registration error: {e}")
 
-                if seed_content:
-                    seed_response = bytes(seed_content).decode('utf-8')
-                    return f"Manager_Proxy_Success: {seed_response}"
-                else:
-                    return "Manager_Proxy_Error: Seedから空のデータが返されました"
 
-            except Exception as e:
-                return f"Manager_Proxy_Error: Seedへの送信に失敗しました ({e})"
-
-        # --- 子コンテナ作成要求の受付（頭脳に徹し、スパイへリダイレクト案内） ---
-        # 形式: /manager/create/<worker_id>/<container_name>/[cpu_shares]/[mem_limit]
-        # 例: /manager/create/producer_1/task-calc-sum/512/256m
-        if operation == 'create':
-            if len(split_name) < 3: return "Error: Invalid create format."
-            worker_id = split_name[1]
-            container_name = split_name[2]
-            shares = split_name[3] if len(split_name) >= 4 else "1024"
-            memory = split_name[4] if len(split_name) >= 5 else "512m"
-            
-            # スパイのベースコード仕様（/spy/{NODE_NAME}/create_child/...）へ完全対応
-            spy_destination = f"/spy/{worker_id}/create_child/{container_name}/{shares}/{memory}"
-            print(f"-> Redirecting Spy with Interest: {spy_destination}")
-            try:
-                # 第1引数にManager自身の持つ self.app を渡し、第2引数にSpyのNameを渡す
-                spy_content = await send_interest(self.app, spy_destination)
-                
-                if spy_content:
-                    # 受信したバイナリデータを文字列にデコード
-                    spy_response = bytes(spy_content).decode('utf-8')
-                    return f"Manager_Proxy_Success: {spy_response}"
-                else:
-                    return "Manager_Proxy_Error: Spyから空のデータが返されました"
-                    
-            except Exception as e:
-                # タイムアウトやNackなどの例外をキャッチ
-                return f"Manager_Proxy_Error: Spyへの送信に失敗しました ({e})"
-
-        # --- 既存のCRUD・検索ロジック ---
-        result = "Error: Unknown operation"
-        if operation == 'search':
-            if target_type == 'user' and len(split_name) == 3:
-                result = f"UserExists:{'True' if self.search_user_from_userid(split_name[2]) else 'False'}"
-            elif target_type == 'resource' and len(split_name) >= 3:
-                result = f"ResourceExists:{'True' if self.search_resource_from_list('/' + '/'.join(split_name[2:])) else 'False'}"
-        
-        elif operation == 'add':
-            if target_type == 'user' and len(split_name) == 3:
-                result = self.add_user(split_name[2])
-            elif target_type == 'resource' and len(split_name) >= 4:
-                result = self.add_resource_to_user(split_name[2], '/' + '/'.join(split_name[3:]))
-
-        elif operation == 'delete':
-            if target_type == 'user' and len(split_name) == 3:
-                result = self.remove_user(split_name[2])
-            elif target_type == 'resource' and len(split_name) >= 4:
-                result = self.remove_resource_from_user(split_name[2], '/' + '/'.join(split_name[3:]))
-            
-        if operation in ['add', 'delete'] and result == 'Success':
-            print(f"\n--- Current User List ---\n{json.dumps(self.resource_lists, indent=2)}\n---------------------\n")
-
-        return result
+async def main():
+    app.route(Name.from_str(PREFIX), on_interest)
+    await app.face.open()
+    await app.register(Name.from_str(PREFIX))
+    await app.face.run()
 
 if __name__ == '__main__':
-    manager = Manager()
-    manager.run('/manager', manager.on_interest)
+    asyncio.run(main())

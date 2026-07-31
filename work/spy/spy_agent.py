@@ -59,35 +59,17 @@ def on_interest(name, interest_param, app_param):
         payload = get_resource_payload()
         app.put_data(name, content=payload, freshness_period=1000)
 
-async def register_remote_prefix(app: NDNApp, prefix_str: str):
-    """リモート登録用: /localhop/nfd/rib/register を使用"""
-    topic = Name.from_str('/localhop/nfd/rib/register')
-    params = ControlParameters()
-    params.name = Name.from_str(prefix_str)
-    params.face_id = 0  # 自身のFace
-    params.origin = 65
-    params.cost = 0
-    params.flags = 1
-
-    signer = app.keychain.get_signer({})
-    interest_name = make_command(topic, params, signer=signer)
-
-    try:
-        _, _, content = await app.express_interest(interest_name, lifetime=4000)
-        response = ControlResponse.parse(content)
-        if response.status_code in (200, 214):
-            logging.info(f"Successfully registered: {prefix_str}")
-        else:
-            logging.error(f"Registration failed: {response.status_text}")
-    except Exception as e:
-        logging.error(f"Registration error: {e}")
-
-async def main():
-    await app.face.open()
-    # 登録処理
-    await register_remote_prefix(app, PREFIX)
-    # 待機ループ
-    await app.face.run()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    # 1. NFDからパケットが届いた際の「受け皿（関数）」をPrefixと紐づけて登録
+    # ※ PREFIX変数やon_interest関数はご自身のSpyプログラムのものに合わせてください
+    app.route(Name.from_str(PREFIX))(on_interest)
+    
+    logging.info(f"Starting Spy NDNApp... Waiting for Interests on {PREFIX}")
+    
+    # 2. NDNAppの通信エンジンを起動
+    # （NFDへのTCP接続、Prefixの自動登録、永遠にInterestを待機するループをすべて自動で行います）
+    try:
+        app.run_forever()
+    except KeyboardInterrupt:
+        logging.info("Spy stopped by user.")
