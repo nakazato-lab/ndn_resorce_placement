@@ -18,6 +18,16 @@ jobs:
       contents: read
       packages: write
 
+    strategy:
+      matrix:
+        include:
+          - name: Manager
+            dockerfile: ./work/Dockerfile.manager
+            image: ndn-manager
+          - name: Spy
+            dockerfile: ./work/Dockerfile.spy
+            image: ndn-spy
+
     steps:
       # 1. リポジトリのコードを取得
       - name: Check out the repository
@@ -35,20 +45,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 4. Managerイメージのビルドとプッシュ
-      - name: Build and push Manager Image
+      # 4. イメージのビルドとプッシュ（Manager/Spyを並列実行）
+      - name: Build and push ${{ matrix.name }} Image
         uses: docker/build-push-action@v5
         with:
           context: ./work
-          file: ./work/Dockerfile.manager
+          file: ${{ matrix.dockerfile }}
           push: true
-          tags: ${{ env.REGISTRY }}/${{ github.repository }}/ndn-manager:latest
-
-      # 5. Spyイメージのビルドとプッシュ
-      - name: Build and push Spy Image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./work
-          file: ./work/Dockerfile.spy
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ github.repository }}/ndn-spy:latest
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}:latest
