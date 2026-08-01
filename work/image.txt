@@ -1,3 +1,0 @@
-func = funcA, worker = workerX
-func = funcB, worker = workerY
-func = funcA, worker = workerX

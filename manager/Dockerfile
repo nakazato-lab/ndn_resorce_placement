@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir python-ndn kubernetes
 
 # プログラムのコピー
-COPY Manager/ndn_manager.py /app/
+COPY manager/ndn_manager.py /app/
 
 # 2. 起動コマンド: NFDの準備ができるまで待機してからManagerを起動
 # ※ Managerは /etc/ndn-config/ADDRESS からNFDのIPを取得する仕様のため、
