@@ -176,7 +176,7 @@ async def process_register(name, app_param):
     best_node = best_node_info['node_name']
 
     # 決定したノードのSeedへCreate Interestを送信
-    seed_prefix = f"/{best_node}/seed/create"
+    seed_prefix = f"/{best_node}/seed"
     forward_params = json.dumps({
         "type": "CREATE",
         "name": func_name,
