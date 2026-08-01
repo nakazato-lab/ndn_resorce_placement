@@ -201,7 +201,7 @@ async def process_register(name, app_param):
     
     try:
         _, _, seed_content = await app.express_interest(
-            seed_prefix, app_param=forward_params, must_be_fresh=True, can_be_prefix=False, lifetime=5000)
+            seed_prefix, app_param=forward_params, must_be_fresh=True, can_be_prefix=True, lifetime=5000)
         result_msg = f"Success: Function deployed on {best_node}. Seed response: {bytes(seed_content).decode('utf-8')}"
         logging.info(result_msg)
     except InterestNack as e:
