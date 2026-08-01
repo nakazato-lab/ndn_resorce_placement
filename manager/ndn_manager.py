@@ -10,6 +10,7 @@ from ndn.encoding import Name
 from ndn.transport.stream_face import TcpFace
 from ndn.app_support.nfd_mgmt import make_command, ControlParameters, ControlResponse
 from ndn.security import KeychainDigest
+from ndn.types import InterestNack, InterestTimeout, InterestCanceled, ValidationFailure
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -156,8 +157,18 @@ async def process_register(name, app_param):
             spy_json = json.loads(bytes(spy_content).decode('utf-8'))
             spy_json['timestamp'] = datetime.now().isoformat()
             db_data.append(spy_json)
+        except InterestNack as e:
+            logging.warning(f"Nacked by Spy {spy_prefix}: reason={e.reason}")
+        except InterestTimeout:
+            logging.warning(f"Timeout getting resource from {spy_prefix}")
+        except InterestCanceled:
+            logging.warning(f"Interest canceled for {spy_prefix}")
+        except ValidationFailure:
+            logging.warning(f"Data failed to validate for {spy_prefix}")
+        except json.JSONDecodeError as e:
+            logging.warning(f"Invalid JSON from {spy_prefix}: {e}")
         except Exception as e:
-            logging.warning(f"Timeout or Error getting resource from {node_name}: {e}")
+            logging.warning(f"Unexpected error getting resource from {spy_prefix}: {type(e).__name__}: {e}")
 
     os.makedirs(os.path.dirname(DB_FILENAME), exist_ok=True)
     with open(DB_FILENAME, "w", encoding="utf-8") as f:
@@ -184,12 +195,27 @@ async def process_register(name, app_param):
         "content_type": content_type
     }).encode('utf-8')
 
+    logging.info(f"Sending Interest to Seed: {seed_prefix} (func={func_name})")
     try:
         _, _, seed_content = await app.express_interest(
             seed_prefix, app_param=forward_params, must_be_fresh=True, can_be_prefix=False, lifetime=5000)
         result_msg = f"Success: Function deployed on {best_node}. Seed response: {bytes(seed_content).decode('utf-8')}"
+        logging.info(result_msg)
+    except InterestNack as e:
+        result_msg = f"Error: Seed deployment failed on {best_node} (target={seed_prefix}): Nacked with reason={e.reason}"
+        logging.error(result_msg)
+    except InterestTimeout:
+        result_msg = f"Error: Seed deployment failed on {best_node} (target={seed_prefix}): Timeout waiting for Seed response"
+        logging.error(result_msg)
+    except InterestCanceled:
+        result_msg = f"Error: Seed deployment failed on {best_node} (target={seed_prefix}): Interest canceled"
+        logging.error(result_msg)
+    except ValidationFailure:
+        result_msg = f"Error: Seed deployment failed on {best_node} (target={seed_prefix}): Data failed to validate"
+        logging.error(result_msg)
     except Exception as e:
-        result_msg = f"Error: Seed deployment failed on {best_node}: {e}"
+        result_msg = f"Error: Seed deployment failed on {best_node} (target={seed_prefix}): {type(e).__name__}: {e}"
+        logging.exception(result_msg)
 
     app.put_data(name, content=result_msg.encode('utf-8'), freshness_period=1000)
 
