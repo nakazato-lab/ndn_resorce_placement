@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import asyncio
+import hashlib
 from datetime import datetime
 
 from kubernetes import client, config
@@ -188,17 +189,21 @@ async def process_register(name, app_param):
 
     # 決定したノードのSeedへCreate Interestを送信
     seed_prefix = f"/{best_node}/seed"
-    param_payload = {
+    forward_params = json.dumps({
         "type": "CREATE",
         "name": func_name,
         "content": content,
         "content_type": content_type
-    }
-    forward_params = json.dumps(param_payload).encode('utf-8')
+    }).encode('utf-8')
 
-    # 実際に送信されるInterestのPrefixとApplicationParametersの内容をログに出力
-    logging.info(f"Sending Interest to Seed -> Target: {seed_prefix} | AppParam: {json.dumps(param_payload, ensure_ascii=False)}")
+    # アプリケーションパラメータのSHA-256ハッシュを計算
+    param_hash = hashlib.sha256(forward_params).hexdigest()
     
+    # 実際にNFD経由で送信される完全なInterestのNameを再現
+    actual_interest_name = f"{seed_prefix}/params-sha256={param_hash}"
+
+    logging.info(f"Sending Interest to Seed: {actual_interest_name}")
+
     try:
         _, _, seed_content = await app.express_interest(
             seed_prefix, app_param=forward_params, must_be_fresh=True, can_be_prefix=False, lifetime=5000)
