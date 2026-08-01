@@ -188,14 +188,17 @@ async def process_register(name, app_param):
 
     # 決定したノードのSeedへCreate Interestを送信
     seed_prefix = f"/{best_node}/seed"
-    forward_params = json.dumps({
+    param_payload = {
         "type": "CREATE",
         "name": func_name,
         "content": content,
         "content_type": content_type
-    }).encode('utf-8')
+    }
+    forward_params = json.dumps(param_payload).encode('utf-8')
 
-    logging.info(f"Sending Interest to Seed: {seed_prefix} (func={func_name})")
+    # 実際に送信されるInterestのPrefixとApplicationParametersの内容をログに出力
+    logging.info(f"Sending Interest to Seed -> Target: {seed_prefix} | AppParam: {json.dumps(param_payload, ensure_ascii=False)}")
+    
     try:
         _, _, seed_content = await app.express_interest(
             seed_prefix, app_param=forward_params, must_be_fresh=True, can_be_prefix=False, lifetime=5000)
