@@ -42,13 +42,30 @@ if os.path.exists("/host/proc"):
     os.environ["PROCFS_PATH"] = "/host/proc"
 
 def get_resource_payload():
+    """リソース使用状況を取得し、Manager向けのスコア化されたペイロードを生成する"""
     cpu = psutil.cpu_percent(interval=0.1)
     mem = psutil.virtual_memory().percent
+
+    # ノードの稼働限界（閾値）を80%に設定
+    LIMIT_THRESHOLD = 80.0
+
+    # 100点満点で受け入れ可能度（スコア）を計算
+    # 使用率が閾値を超えた場合はマイナスになるため、max(0, ...) で最低点を0点にする
+    cpu_score = max(0, int((LIMIT_THRESHOLD - cpu) / LIMIT_THRESHOLD * 100))
+    mem_score = max(0, int((LIMIT_THRESHOLD - mem) / LIMIT_THRESHOLD * 100))
+
+    # GPUと帯域は現状のpsutilでは取得できないため、ひとまず0点として定義
+    gpu_score = 0
+    bw_score = 0
+
     return json.dumps({
         "node_name": MY_NODE_NAME,
-        "cpu_usage": f"{cpu}%",
-        "memory_usage": f"{mem}%",
-        "score": int(12000 * ((100.0 - cpu) / 100.0))
+        "cpu_score": cpu_score,
+        "mem_score": mem_score,
+        "gpu_score": gpu_score,
+        "bw_score": bw_score,
+        "raw_cpu_usage": f"{cpu}%", # デバッグ用に元の生データも残しておく
+        "raw_mem_usage": f"{mem}%"  # デバッグ用に元の生データも残しておく
     }).encode('utf-8')
 
 # Interestハンドラ: /{NODE_NAME}/spy/resource などを処理
