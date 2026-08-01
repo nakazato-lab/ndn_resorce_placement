@@ -52,12 +52,21 @@ def get_resource_payload():
     }).encode('utf-8')
 
 # Interestハンドラ: /{NODE_NAME}/spy/resource などを処理
-@app.route(PREFIX)
 def on_interest(name, interest_param, app_param):
+    name_str = Name.to_str(name)
+    # 【追加】Interestを受信したログ
+    logging.info(f"Received Interest: {name_str}")
+
     # 名前の末尾が 'resource' かどうかで判定
     if Component.to_str(name[-1]) == 'resource':
         payload = get_resource_payload()
         app.put_data(name, content=payload, freshness_period=1000)
+        
+        # 【追加】Managerへデータを返却したログ（中身も確認できるようにデコードして表示）
+        logging.info(f"Returned resource info to Manager: {payload.decode('utf-8')}")
+    else:
+        # 【追加】対象外のInterestだった場合のログ（任意ですがデバッグに役立ちます）
+        logging.info(f"Ignored Interest (not 'resource'): {name_str}")
 
 
 if __name__ == '__main__':
