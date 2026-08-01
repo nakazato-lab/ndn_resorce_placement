@@ -160,35 +160,18 @@ async def process_register(name, app_param):
     app.put_data(name, content=result_msg.encode('utf-8'), freshness_period=1000)
 
 
-async def register_remote_prefix(app: NDNApp, prefix_str: str):
-    """リモートのNFDに対して /localhop を使ってプレフィックスを登録する"""
-    topic = Name.from_str('/localhop/nfd/rib/register')
-    params = ControlParameters()
-    params.name = Name.from_str(prefix_str)
-    params.face_id = 0
-    params.origin = 65
-    params.cost = 0
-    params.flags = 1
-
-    signer = app.keychain.get_signer({})
-    interest_name = make_command(topic, params, signer=signer)
-
-    try:
-        _, _, content = await app.express_interest(interest_name, lifetime=4000)
-        response = ControlResponse.parse(content)
-        if response.status_code in (200, 214):
-            logging.info(f"Successfully registered Manager prefix: {prefix_str}")
-        else:
-            logging.error(f"Registration failed: {response.status_text}")
-    except Exception as e:
-        logging.error(f"Registration error: {e}")
 
 
-async def main():
-    app.route(Name.from_str(PREFIX), on_interest)
-    await app.face.open()
-    await app.register(Name.from_str(PREFIX))
-    await app.face.run()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    # 1. NFDからパケットが届いた際の「受け皿（関数）」をPrefixと紐づけて登録
+    app.route(Name.from_str(PREFIX))(on_interest)
+    
+    logging.info(f"Starting Manager NDNApp... Waiting for Interests on {PREFIX}")
+    
+    # 2. NDNAppの通信エンジンを起動
+    # （NFDへのTCP接続、Prefixの自動登録、永遠にInterestを待機するループをすべて自動で行います）
+    try:
+        app.run_forever()
+    except KeyboardInterrupt:
+        logging.info("Manager stopped by user.")

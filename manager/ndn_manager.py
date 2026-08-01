@@ -43,7 +43,8 @@ else:
 def calculate_score_and_select_node(db_data, target_node=None):
     """
     各ノードのリソース情報から最適な配置先を決定する。
-    提案手法が確立するまでは、手動指定またはscoreの最大値に基づく簡易計算を行う。
+    1. 手動指定がある場合はそれを使用。
+    2. 基本は、CPU, メモリ, GPU, 帯域のスコア（100点満点）に重みを掛けて総合スコアを算出し、最大値のノードを選択。
     """
     if not db_data:
         return None
@@ -54,11 +55,43 @@ def calculate_score_and_select_node(db_data, target_node=None):
             if node.get('node_name') == target_node:
                 logging.info(f"Manual target node selected: {target_node}")
                 return node
-        logging.warning(f"Target node '{target_node}' not found in DB. Falling back to simple calculation.")
+        logging.warning(f"Target node '{target_node}' not found in DB. Falling back to calculation.")
 
-    # 簡易的な計算（scoreの最大値を選択）
-    best_node = max(db_data, key=lambda x: x.get('score', 0))
-    logging.info(f"Auto-selected node: {best_node.get('node_name')} (score: {best_node.get('score')})")
+    # 評価指標の重み付け（和が1.0）
+    # ※今後の拡張で、要求される関数ごとにこの重みを動的に変えられるよう変更する
+    weights = {
+        'gpu': 0.50,
+        'mem': 0.25,
+        'cpu': 0.15,
+        'bw':  0.10
+    }
+
+    best_node = None
+    max_score = -1.0
+
+    # 各ノードの総合スコアを計算
+    for node in db_data:
+        # Spyから取得したデータから各スコアを抽出（未取得の場合は0とする）
+        s_gpu = node.get('gpu_score', 0)
+        s_mem = node.get('mem_score', 0)
+        s_cpu = node.get('cpu_score', 0)
+        s_bw  = node.get('bw_score', 0)
+
+        # ResourceScore = w_cpu*S_cpu + w_mem*S_mem + w_gpu*S_gpu + w_bw*S_bw
+        total_score = (weights['gpu'] * s_gpu) + \
+                      (weights['mem'] * s_mem) + \
+                      (weights['cpu'] * s_cpu) + \
+                      (weights['bw']  * s_bw)
+        
+        # ログ確認用に計算結果を格納
+        node['calculated_total_score'] = total_score
+
+        if total_score > max_score:
+            max_score = total_score
+            best_node = node
+
+    if best_node:
+        logging.info(f"Auto-selected node: {best_node.get('node_name')} (score: {max_score:.2f})")
     
     return best_node
 
@@ -99,7 +132,8 @@ async def process_register(name, app_param):
     func_name = req.get("name")
     content = req.get("content")
     content_type = req.get("content_type", "ndn")
-    target_node = req.get("target_node")
+    target_node = None# テストとかで手動選択するならここを変更
+    # target_node = req.get("target_node") もし、app_paramにターゲットを載せるならこれはいるけどたぶんいらないはず
 
     if not func_name or not content:
         app.put_data(name, content=b"Error: 'name' and 'content' are required", freshness_period=1000)
