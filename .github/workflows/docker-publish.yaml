@@ -27,6 +27,9 @@ jobs:
           - name: Spy
             dockerfile: ./spy/Dockerfile
             image: ndn-spy
+          - name: Registerer
+            dockerfile: ./registerer/Dockerfile
+            image: ndn-registerer
 
     steps:
       # 1. リポジトリのコードを取得
@@ -45,7 +48,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 4. イメージのビルドとプッシュ（Manager/Spyを並列実行）
+      # 4. イメージのビルドとプッシュ（Manager/Spy/Registererを並列実行）
       - name: Build and push ${{ matrix.name }} Image
         uses: docker/build-push-action@v5
         with:

@@ -1,0 +1,2 @@
+let avg = (arg0 + arg1) / 2
+print avg
