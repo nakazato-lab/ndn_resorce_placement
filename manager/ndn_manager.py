@@ -121,8 +121,37 @@ def on_interest(name, interest_param, app_param):
         asyncio.create_task(process_register(name, app_param))
 
 
+def get_delete_node(prefix):
+    """Find the owning node; use one running Seed only for orphaned ConfigMaps."""
+    config.load_incluster_config()
+    namespace_path = '/var/run/secrets/kubernetes.io/serviceaccount/namespace'
+    with open(namespace_path, encoding='utf-8') as stream:
+        namespace = stream.read().strip()
+    api = client.CoreV1Api()
+    selector = 'managed-by=ndn-seed-python'
+    pods = api.list_namespaced_pod(namespace, label_selector=selector, _request_timeout=10).items
+    function_pod = next((pod for pod in pods
+                         if (pod.metadata.annotations or {}).get('ndn-prefix') == prefix), None)
+    if function_pod is not None and function_pod.spec.node_name:
+        return function_pod.spec.node_name
+    maps = api.list_namespaced_config_map(
+        namespace, label_selector=selector, _request_timeout=10).items
+    has_config = any((item.metadata.annotations or {}).get('ndn-prefix') == prefix for item in maps)
+    if function_pod is None and not has_config:
+        return None  # Already deleted: retry succeeds without sending another Interest.
+    # ConfigMaps belong to a namespace, not a node. Any Seed in this namespace
+    # can remove an orphaned ConfigMap (or an unscheduled function Pod).
+    seeds = api.list_namespaced_pod(namespace, label_selector='app=seed', _request_timeout=10).items
+    for pod in seeds:
+        if (pod.spec.node_name and not pod.metadata.deletion_timestamp
+                and any(c.type == 'Ready' and c.status == 'True'
+                        for c in (pod.status.conditions or []))):
+            return pod.spec.node_name
+    raise RuntimeError('Function resources remain but no ready Seed is available')
+
+
 async def process_delete(name, app_param):
-    """Delete through every Seed; no in-memory placement record is required."""
+    """Send DELETE to the Seed responsible for the function resources."""
     try:
         req = json.loads(bytes(app_param or b'').decode('utf-8'))
         func_name = req.get('name')
@@ -131,26 +160,19 @@ async def process_delete(name, app_param):
         prefix = Name.to_str(Name.normalize('/' + func_name.lstrip('/')))
         if prefix == '/':
             raise ValueError('Cannot delete the root prefix')
-        nodes = await asyncio.to_thread(get_k8s_nodes)
-        if not nodes:
-            raise RuntimeError('Cannot find any K8s nodes')
-        params = json.dumps({'type': 'DELETE', 'name': func_name}).encode()
-
-        async def delete_on_node(node):
+        node = await asyncio.to_thread(get_delete_node, prefix)
+        if node is None:
+            message = f'Success: Function {prefix} is already deleted'
+        else:
+            logging.info('DELETE %s: target Seed node=%s', prefix, node)
+            params = json.dumps({'type': 'DELETE', 'name': func_name}).encode()
             _, _, content = await app.express_interest(
                 f'/{node}/seed', app_param=params, must_be_fresh=True,
                 can_be_prefix=True, lifetime=90000)
             response = bytes(content or b'').decode()
             if not response.strip() or response.startswith('Error:') or prefix in response.splitlines():
                 raise RuntimeError(f'{node}: {response}')
-
-        results = await asyncio.gather(*(delete_on_node(node) for node in nodes),
-                                       return_exceptions=True)
-        failures = [f'{node}: {type(result).__name__}: {result}'
-                    for node, result in zip(nodes, results) if isinstance(result, BaseException)]
-        if failures:
-            raise RuntimeError('; '.join(failures))
-        message = f'Success: Function {prefix} deleted by Seeds'
+            message = f'Success: Function {prefix} deleted by Seed on {node}'
     except Exception as exc:
         logging.exception('Function deletion failed')
         message = f'Error: Function deletion failed: {exc}'
