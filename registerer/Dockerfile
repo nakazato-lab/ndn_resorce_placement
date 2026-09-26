@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir python-ndn
 
 # プログラムのコピー
 COPY registerer/registerer.py /app/
-COPY registerer/function.ndn /app/
+COPY registerer/average.ndn /app/
 
 # 2. 起動コマンド: NFDの準備ができるまで待機してからRegistererを起動
 # (Manager/Spyと同じ待機ロジック)
