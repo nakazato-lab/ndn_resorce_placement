@@ -115,8 +115,46 @@ def on_interest(name, interest_param, app_param):
     logging.info(f"Received Interest: {name_str}")
     
     # --- .ndn関数の登録要求受付 ---
-    if "register" in name_str:
+    if Name.is_prefix(Name.from_str("/Manager/delete"), name):
+        asyncio.create_task(process_delete(name, app_param))
+    elif Name.is_prefix(Name.from_str("/Manager/register"), name):
         asyncio.create_task(process_register(name, app_param))
+
+
+async def process_delete(name, app_param):
+    """Delete through every Seed; no in-memory placement record is required."""
+    try:
+        req = json.loads(bytes(app_param or b'').decode('utf-8'))
+        func_name = req.get('name')
+        if not isinstance(func_name, str) or not func_name.strip():
+            raise ValueError('name is required')
+        prefix = Name.to_str(Name.normalize('/' + func_name.lstrip('/')))
+        if prefix == '/':
+            raise ValueError('Cannot delete the root prefix')
+        nodes = await asyncio.to_thread(get_k8s_nodes)
+        if not nodes:
+            raise RuntimeError('Cannot find any K8s nodes')
+        params = json.dumps({'type': 'DELETE', 'name': func_name}).encode()
+
+        async def delete_on_node(node):
+            _, _, content = await app.express_interest(
+                f'/{node}/seed', app_param=params, must_be_fresh=True,
+                can_be_prefix=True, lifetime=90000)
+            response = bytes(content or b'').decode()
+            if not response.strip() or response.startswith('Error:') or prefix in response.splitlines():
+                raise RuntimeError(f'{node}: {response}')
+
+        results = await asyncio.gather(*(delete_on_node(node) for node in nodes),
+                                       return_exceptions=True)
+        failures = [f'{node}: {type(result).__name__}: {result}'
+                    for node, result in zip(nodes, results) if isinstance(result, BaseException)]
+        if failures:
+            raise RuntimeError('; '.join(failures))
+        message = f'Success: Function {prefix} deleted by Seeds'
+    except Exception as exc:
+        logging.exception('Function deletion failed')
+        message = f'Error: Function deletion failed: {exc}'
+    app.put_data(name, content=message.encode(), freshness_period=0)
 
 
 async def process_register(name, app_param):
