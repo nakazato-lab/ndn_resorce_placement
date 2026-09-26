@@ -207,8 +207,17 @@ async def process_register(name, app_param):
     try:
         _, _, seed_content = await app.express_interest(
             seed_prefix, app_param=forward_params, must_be_fresh=True, can_be_prefix=True, lifetime=5000)
-        result_msg = f"Success: Function deployed on {best_node}. Seed response: {bytes(seed_content).decode('utf-8')}"
-        logging.info(result_msg)
+        seed_response = bytes(seed_content).decode('utf-8')
+        expected_prefix = Name.to_str(Name.normalize('/' + func_name.lstrip('/')))
+        if seed_response.lstrip().startswith('Error:'):
+            result_msg = f"Error: Seed rejected registration on {best_node}: {seed_response}"
+            logging.error(result_msg)
+        elif expected_prefix not in seed_response.splitlines():
+            result_msg = f"Error: Unexpected Seed response on {best_node}: {seed_response}"
+            logging.error(result_msg)
+        else:
+            result_msg = f"Success: Function resources created on {best_node}. Seed response: {seed_response}"
+            logging.info(result_msg)
     except InterestNack as e:
         result_msg = f"Error: Seed deployment failed on {best_node} (target={seed_prefix}): Nacked with reason={e.reason}"
         logging.error(result_msg)

@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 
 MANAGER_REGISTER_NAME = "/Manager/register"
 FUNCTION_PATH = os.path.join(os.path.dirname(__file__), "function.ndn")
-FUNCTION_NAME = os.path.splitext(os.path.basename(FUNCTION_PATH))[0]
+FUNCTION_NAME = os.environ.get("FUNCTION_NAME", "func")
 CONTENT_TYPE = "ndn"
 
 # NFD_ADDRの取得とポート分割処理（manager/ndn_manager.pyと同じロジック）
