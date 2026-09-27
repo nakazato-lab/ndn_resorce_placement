@@ -258,7 +258,7 @@ async def process_register(name, app_param):
 
     try:
         _, _, seed_content = await app.express_interest(
-            seed_prefix, app_param=forward_params, must_be_fresh=True, can_be_prefix=True, lifetime=5000)
+            seed_prefix, app_param=forward_params, must_be_fresh=True, can_be_prefix=True, lifetime=90000)
         seed_response = bytes(seed_content).decode('utf-8')
         expected_prefix = Name.to_str(Name.normalize('/' + func_name.lstrip('/')))
         if seed_response.lstrip().startswith('Error:'):
