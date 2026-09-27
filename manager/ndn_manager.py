@@ -183,16 +183,24 @@ async def process_register(name, app_param):
 
     try:
         req = json.loads(bytes(app_param).decode('utf-8'))
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
         app.put_data(name, content=f"Error: Invalid JSON ({e})".encode('utf-8'), freshness_period=1000)
         return
 
+    if not isinstance(req, dict):
+        app.put_data(name, content=b"Error: ApplicationParameters must be a JSON object", freshness_period=1000)
+        return
     func_name = req.get("name")
+    code = req.get("content")
     target_node = None# テストとかで手動選択するならここを変更
     # target_node = req.get("target_node") もし、app_paramにターゲットを載せるならこれはいるけどたぶんいらないはず
 
     if not isinstance(func_name, str) or not func_name.strip():
         app.put_data(name, content=b"Error: 'name' is required", freshness_period=1000)
+        return
+
+    if not isinstance(code, str) or not code.strip() or '\x00' in code:
+        app.put_data(name, content=b"Error: 'content' must be nonempty text without NUL characters", freshness_period=1000)
         return
 
     # K8sから全ノード名を取得し、Spyへリソース照会
@@ -245,8 +253,9 @@ async def process_register(name, app_param):
     seed_prefix = f"/{best_node}/seed"
     forward_params = json.dumps({
         "type": "CREATE",
-        "name": func_name
-    }).encode('utf-8')
+        "name": func_name,
+        "content": code
+    }, ensure_ascii=False).encode('utf-8')
 
     # アプリケーションパラメータのSHA-256ハッシュを計算
     param_hash = hashlib.sha256(forward_params).hexdigest()
