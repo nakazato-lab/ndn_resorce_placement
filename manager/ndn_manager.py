@@ -122,7 +122,7 @@ def on_interest(name, interest_param, app_param):
 
 
 def get_delete_node(prefix):
-    """Find the owning node; use one running Seed only for orphaned ConfigMaps."""
+    """Find the owning node; use one ready Seed for an unscheduled Pod."""
     config.load_incluster_config()
     namespace_path = '/var/run/secrets/kubernetes.io/serviceaccount/namespace'
     with open(namespace_path, encoding='utf-8') as stream:
@@ -134,13 +134,9 @@ def get_delete_node(prefix):
                          if (pod.metadata.annotations or {}).get('ndn-prefix') == prefix), None)
     if function_pod is not None and function_pod.spec.node_name:
         return function_pod.spec.node_name
-    maps = api.list_namespaced_config_map(
-        namespace, label_selector=selector, _request_timeout=10).items
-    has_config = any((item.metadata.annotations or {}).get('ndn-prefix') == prefix for item in maps)
-    if function_pod is None and not has_config:
-        return None  # Already deleted: retry succeeds without sending another Interest.
-    # ConfigMaps belong to a namespace, not a node. Any Seed in this namespace
-    # can remove an orphaned ConfigMap (or an unscheduled function Pod).
+    if function_pod is None:
+        return None  # ConfigMaps are managed by Argo CD.
+    # An unscheduled Pod can be deleted by any ready Seed in this namespace.
     seeds = api.list_namespaced_pod(namespace, label_selector='app=seed', _request_timeout=10).items
     for pod in seeds:
         if (pod.spec.node_name and not pod.metadata.deletion_timestamp
@@ -192,13 +188,11 @@ async def process_register(name, app_param):
         return
 
     func_name = req.get("name")
-    content = req.get("content")
-    content_type = req.get("content_type", "ndn")
     target_node = None# テストとかで手動選択するならここを変更
     # target_node = req.get("target_node") もし、app_paramにターゲットを載せるならこれはいるけどたぶんいらないはず
 
-    if not func_name or not content:
-        app.put_data(name, content=b"Error: 'name' and 'content' are required", freshness_period=1000)
+    if not isinstance(func_name, str) or not func_name.strip():
+        app.put_data(name, content=b"Error: 'name' is required", freshness_period=1000)
         return
 
     # K8sから全ノード名を取得し、Spyへリソース照会
@@ -251,9 +245,7 @@ async def process_register(name, app_param):
     seed_prefix = f"/{best_node}/seed"
     forward_params = json.dumps({
         "type": "CREATE",
-        "name": func_name,
-        "content": content,
-        "content_type": content_type
+        "name": func_name
     }).encode('utf-8')
 
     # アプリケーションパラメータのSHA-256ハッシュを計算
