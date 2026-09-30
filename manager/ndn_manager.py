@@ -6,7 +6,7 @@ import hashlib
 from datetime import datetime
 
 from kubernetes import client, config
-from ndn.app import NDNApp
+from ndn_routing import RoutedNDNApp
 from ndn.encoding import Name
 from ndn.transport.stream_face import TcpFace
 from ndn.app_support.nfd_mgmt import make_command, ControlParameters, ControlResponse
@@ -35,10 +35,10 @@ if NFD_ADDR and NFD_ADDR != "not available yet":
         port = 6363
         
     logging.info(f"Connecting to NFD via TCP: {host}:{port}")
-    app = NDNApp(face=TcpFace(host, port), keychain=KeychainDigest())
+    app = RoutedNDNApp(face=TcpFace(host, port), keychain=KeychainDigest())
 else:
     logging.info("Connecting to NFD via local UNIX socket")
-    app = NDNApp(keychain=KeychainDigest())
+    app = RoutedNDNApp(keychain=KeychainDigest())
 
 
 # 3. スコア計算関数の独立化（簡易計算および手動指定）

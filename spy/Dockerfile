@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir python-ndn psutil
 
 # プログラムのコピー
+COPY ndn_routing.py /app/
 COPY spy/spy_agent.py /app/
 
 # 2. 起動コマンド: NFDの準備ができるまで待機してからSpyを起動
