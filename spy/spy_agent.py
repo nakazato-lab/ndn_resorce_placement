@@ -39,7 +39,7 @@ else:
 
 # ホストのリソース取得用パス設定
 if os.path.exists("/host/proc"):
-    os.environ["PROCFS_PATH"] = "/host/proc"
+    psutil.PROCFS_PATH = "/host/proc"
 
 def get_resource_payload():
     """リソース使用状況を取得し、Manager向けのスコア化されたペイロードを生成する"""

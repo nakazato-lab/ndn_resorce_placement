@@ -41,60 +41,43 @@ else:
     app = RoutedNDNApp(keychain=KeychainDigest())
 
 
-# 3. スコア計算関数の独立化（簡易計算および手動指定）
-def calculate_score_and_select_node(db_data, target_node=None):
-    """
-    各ノードのリソース情報から最適な配置先を決定する。
-    1. 手動指定がある場合はそれを使用。
-    2. 基本は、CPU, メモリ, GPU, 帯域のスコア（100点満点）に重みを掛けて総合スコアを算出し、最大値のノードを選択。
-    """
+def normalize_preference(preference):
+    if not isinstance(preference, dict) or set(preference) - {'cpu', 'memory'}:
+        raise ValueError('preference must be an object containing only cpu and memory')
+    result = {key: preference.get(key, 'medium') for key in ('cpu', 'memory')}
+    for key, value in result.items():
+        if not isinstance(value, str) or value not in ('high', 'medium', 'low'):
+            raise ValueError(f'preference.{key} must be high, medium, or low')
+    return result
+
+
+def calculate_score_and_select_node(db_data, target_node=None, preference=None):
+    """Select the highest weighted CPU/memory headroom score; ties keep list order."""
+    preference = normalize_preference({} if preference is None else preference)
+    weights = {'high': 3, 'medium': 2, 'low': 1}
+    cpu_weight = weights[preference['cpu']]
+    memory_weight = weights[preference['memory']]
     if not db_data:
         return None
-
-    # 手動指定がある場合
     if target_node:
         for node in db_data:
             if node.get('node_name') == target_node:
-                logging.info(f"Manual target node selected: {target_node}")
+                logging.info('Manual target node selected: %s', target_node)
                 return node
-        logging.warning(f"Target node '{target_node}' not found in DB. Falling back to calculation.")
-
-    # 評価指標の重み付け（和が1.0）
-    # ※今後の拡張で、要求される関数ごとにこの重みを動的に変えられるよう変更する
-    weights = {
-        'gpu': 0.50,
-        'mem': 0.25,
-        'cpu': 0.15,
-        'bw':  0.10
-    }
+        logging.warning('Target node %s not found; falling back to calculation', target_node)
 
     best_node = None
     max_score = -1.0
-
-    # 各ノードの総合スコアを計算
     for node in db_data:
-        # Spyから取得したデータから各スコアを抽出（未取得の場合は0とする）
-        s_gpu = node.get('gpu_score', 0)
-        s_mem = node.get('mem_score', 0)
-        s_cpu = node.get('cpu_score', 0)
-        s_bw  = node.get('bw_score', 0)
-
-        # ResourceScore = w_cpu*S_cpu + w_mem*S_mem + w_gpu*S_gpu + w_bw*S_bw
-        total_score = (weights['gpu'] * s_gpu) + \
-                      (weights['mem'] * s_mem) + \
-                      (weights['cpu'] * s_cpu) + \
-                      (weights['bw']  * s_bw)
-        
-        # ログ確認用に計算結果を格納
+        total_score = (cpu_weight * node.get('cpu_score', 0)
+                       + memory_weight * node.get('mem_score', 0)) / (cpu_weight + memory_weight)
         node['calculated_total_score'] = total_score
-
         if total_score > max_score:
             max_score = total_score
             best_node = node
-
     if best_node:
-        logging.info(f"Auto-selected node: {best_node.get('node_name')} (score: {max_score:.2f})")
-    
+        logging.info('Auto-selected node: %s (score: %.2f, preference: %s)',
+                     best_node.get('node_name'), max_score, preference)
     return best_node
 
 
@@ -203,6 +186,12 @@ async def process_register(name, app_param):
         app.put_data(name, content=b"Error: 'content' must be nonempty text without NUL characters", freshness_period=1000)
         return
 
+    try:
+        preference = normalize_preference(req.get('preference', {}))
+    except ValueError as e:
+        app.put_data(name, content=f'Error: {e}'.encode('utf-8'), freshness_period=1000)
+        return
+
     # K8sから全ノード名を取得し、Spyへリソース照会
     node_names = get_k8s_nodes()
     if not node_names:
@@ -242,7 +231,7 @@ async def process_register(name, app_param):
         return
 
     # スコア計算関数を呼び出して最適ノードを決定
-    best_node_info = calculate_score_and_select_node(db_data, target_node)
+    best_node_info = calculate_score_and_select_node(db_data, target_node, preference)
     if not best_node_info:
         app.put_data(name, content=b"Error: Failed to select node", freshness_period=1000)
         return
