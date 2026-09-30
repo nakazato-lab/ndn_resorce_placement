@@ -1,30 +1,20 @@
-# 汎用的でツールが豊富な標準の Python 3.10 イメージを使用
 FROM python:3.10
 
-# 3. インタラクティブなプロンプトを無効化
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# テスト・デバッグに便利なツール群をインストール
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    iputils-ping \
     netcat-openbsd \
-    procps \
     && rm -rf /var/lib/apt/lists/*
 
-# Spyに必要なPythonパッケージのインストール (リソース取得用のpsutil)
 RUN pip install --no-cache-dir python-ndn psutil
 
-# プログラムのコピー
 COPY ndn_routing.py /app/
 COPY spy/spy_agent.py /app/
 
-# 2. 起動コマンド: NFDの準備ができるまで待機してからSpyを起動
-# (Managerと同じ待機ロジック)
 CMD ["/bin/bash", "-c", "\
     echo 'Waiting for NFD endpoint configuration...'; \
     while [ ! -f /etc/ndn-config/ADDRESS ] || [ \"$(cat /etc/ndn-config/ADDRESS)\" = \"not available yet\" ]; do \

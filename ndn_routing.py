@@ -1,10 +1,13 @@
 """Register producer routes as client routes for NFD's NLSR readvertisement."""
 import asyncio
 import logging
+from pathlib import Path
 
 from ndn.app import NDNApp
 from ndn.app_support.nfd_mgmt import make_command, parse_response
 from ndn.encoding import Name
+from ndn.security import KeychainDigest
+from ndn.transport.stream_face import TcpFace
 from ndn.types import InterestNack, InterestTimeout, InterestCanceled, ValidationFailure
 
 LOG = logging.getLogger(__name__)
@@ -49,3 +52,15 @@ class RoutedNDNApp(NDNApp):
             return False
         self.unset_interest_filter(name)
         return True
+
+
+def create_app(config_path='/etc/ndn-config/ADDRESS'):
+    path = Path(config_path)
+    address = path.read_text().strip() if path.exists() else ''
+    if not address or address == 'not available yet':
+        LOG.info('Connecting to NFD via local UNIX socket')
+        return RoutedNDNApp(keychain=KeychainDigest())
+    host, separator, port = address.partition(':')
+    port = int(port) if separator else 6363
+    LOG.info('Connecting to NFD via TCP: %s:%s', host, port)
+    return RoutedNDNApp(face=TcpFace(host, port), keychain=KeychainDigest())
