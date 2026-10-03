@@ -63,7 +63,9 @@ class SpyClient:
         try:
             _, _, content = await self.app.express_interest(
                 prefix, must_be_fresh=True, can_be_prefix=False, lifetime=2000)
-            return json.loads(bytes(content).decode('utf-8'))
+            resource = json.loads(bytes(content).decode('utf-8'))
+            resource['node_name'] = node_name
+            return resource
         except Exception as exc:
             LOG.warning('Cannot get resources from %s: %s: %s', prefix, type(exc).__name__, exc)
             return None

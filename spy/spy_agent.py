@@ -24,7 +24,6 @@ class Spy:
         cpu = psutil.cpu_percent(interval=0.1)
         memory = psutil.virtual_memory().percent
         return json.dumps({
-            'node_name': self.node_name,
             'cpu_score': resource_score(cpu),
             'mem_score': resource_score(memory),
         }).encode('utf-8')
