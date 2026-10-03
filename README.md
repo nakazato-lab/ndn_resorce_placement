@@ -1,3 +1,4 @@
+## アーキテクチャ
 ![manager-spy](docs/images/manager-spy.png)
 
 ## 計算ロジック
