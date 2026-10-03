@@ -23,7 +23,7 @@ def normalize_preference(preference):
     return result
 
 
-def select_node(nodes, preference):
+def select_node(resources, preference):
     weights = {'high': 3, 'medium': 2, 'low': 1}
     cpu_weight = weights[preference['cpu']]
     memory_weight = weights[preference['memory']]
@@ -32,7 +32,7 @@ def select_node(nodes, preference):
         return (cpu_weight * node.get('cpu_score', 0)
                 + memory_weight * node.get('mem_score', 0)) / (cpu_weight + memory_weight)
 
-    selected = max(nodes, key=score, default=None)
+    selected = max(resources, key=score, default=None)
     if selected is not None:
         LOG.info('Selected node: %s (score: %.2f, preference: %s)',
                  selected['node_name'], score(selected), preference)
