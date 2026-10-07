@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir python-ndn psutil
 
 COPY ndn_routing.py /app/
 COPY spy/spy_agent.py /app/
+COPY spy/network_metrics.py /app/
 
 CMD ["/bin/bash", "-c", "\
     echo 'Waiting for NFD endpoint configuration...'; \
