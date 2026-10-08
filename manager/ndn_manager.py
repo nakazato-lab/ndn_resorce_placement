@@ -107,6 +107,21 @@ class SeedClient:
             raise RuntimeError(f'Function {prefix} remains on {node}: {response}')
 
 
+class FunctionClient:
+    def __init__(self, app):
+        self.app = app
+
+    async def fetch_code(self, name):
+        prefix = function_prefix(name).rstrip('/') + '/code'
+        LOG.info('Fetching function code: %s', prefix)
+        _, _, content = await self.app.express_interest(
+            prefix, must_be_fresh=True, can_be_prefix=False, lifetime=6000)
+        code = bytes(content or b'').decode('utf-8')
+        if not code.strip() or '\x00' in code or code.lstrip().startswith('Error:'):
+            raise ValueError(f'Invalid function code response from {prefix}')
+        return code
+
+
 class Manager:
     def __init__(self, app, api, namespace):
         self.app = app
@@ -114,6 +129,7 @@ class Manager:
         self.namespace = namespace
         self.spy = SpyClient(app)
         self.seed = SeedClient(app)
+        self.function = FunctionClient(app)
         self.tasks = set()
 
     def on_interest(self, name, interest_param, app_param):
@@ -136,10 +152,12 @@ class Manager:
         self.app.put_data(name, content=message.encode('utf-8'), freshness_period=freshness)
 
     async def register(self, request):
+        preference = normalize_preference(request.get('preference', {}))
         code = request.get('content')
+        if code is None or (isinstance(code, str) and not code.strip()):
+            code = await self.function.fetch_code(request['name'])
         if not isinstance(code, str) or not code.strip() or '\x00' in code:
             raise ValueError('content must be nonempty text without NUL characters')
-        preference = normalize_preference(request.get('preference', {}))
         nodes = await asyncio.to_thread(self.api.list_node, _request_timeout=10)
         resources = await self.spy.collect_resources([node.metadata.name for node in nodes.items])
         node = select_node(resources, preference)['node_name']
