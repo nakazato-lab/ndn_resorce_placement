@@ -25,10 +25,15 @@ class Spy:
     def get_resource_payload(self):
         cpu = psutil.cpu_percent(interval=0.1)
         memory = psutil.virtual_memory().percent
+        try:
+            bandwidth = self.network.calculate_rates() if self.network else 0
+        except Exception as exc:
+            LOG.warning('Network metrics unavailable: %s', exc)
+            bandwidth = 0
         return json.dumps({
             'cpu_score': resource_score(cpu),
             'mem_score': resource_score(memory),
-            'network': self.network.snapshot if self.network else None,
+            'bandwidth_score': resource_score(bandwidth),
         }).encode('utf-8')
 
     def on_interest(self, name, interest_param, app_param):
@@ -46,13 +51,10 @@ def main():
                                            'http://127.0.0.1:9100/metrics'))
     spy = Spy(app, node_name, network)
     app.route(f'/{spy.node_name}/spy')(spy.on_interest)
-    network.start()
     try:
         app.run_forever()
     except KeyboardInterrupt:
         LOG.info('Spy stopped')
-    finally:
-        network.stop()
 
 
 if __name__ == '__main__':

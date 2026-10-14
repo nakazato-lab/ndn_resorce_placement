@@ -12,11 +12,11 @@ LOG = logging.getLogger(__name__)
 
 
 def normalize_preference(preference):
-    # 戻り値の例: {'cpu': 'high', 'memory': 'medium'}
+    # 戻り値の例: {'cpu': 'high', 'memory': 'medium', 'bandwidth': 'low'}
     # 省略項目はmediumで補完し、不正なキー・値はValueErrorに
-    if not isinstance(preference, dict) or set(preference) - {'cpu', 'memory'}:
-        raise ValueError('preference must be an object containing only cpu and memory')
-    result = {key: preference.get(key, 'medium') for key in ('cpu', 'memory')}
+    if not isinstance(preference, dict) or set(preference) - {'cpu', 'memory', 'bandwidth'}:
+        raise ValueError('preference must be an object containing only cpu, memory, and bandwidth')
+    result = {key: preference.get(key, 'medium') for key in ('cpu', 'memory', 'bandwidth')}
     for key, value in result.items():
         if not isinstance(value, str) or value not in ('high', 'medium', 'low'):
             raise ValueError(f'preference.{key} must be high, medium, or low')
@@ -27,10 +27,13 @@ def select_node(resources, preference):
     weights = {'high': 3, 'medium': 2, 'low': 1}
     cpu_weight = weights[preference['cpu']]
     memory_weight = weights[preference['memory']]
+    bandwidth_weight = weights[preference['bandwidth']]
 
     def score(node):
         return (cpu_weight * node.get('cpu_score', 0)
-                + memory_weight * node.get('mem_score', 0)) / (cpu_weight + memory_weight)
+                + memory_weight * node.get('mem_score', 0)
+                + bandwidth_weight * node.get('bandwidth_score', 0)
+                ) / (cpu_weight + memory_weight + bandwidth_weight)
 
     selected = max(resources, key=score, default=None)
     if selected is not None:
