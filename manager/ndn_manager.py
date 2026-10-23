@@ -88,9 +88,11 @@ class SeedClient:
         self.app = app
 
     async def _send(self, node, request):
+        app_param = json.dumps(request, ensure_ascii=False).encode('utf-8')
         LOG.info('Sending %s to Seed on %s: %s', request['type'], node, request['name'])
+        LOG.info('Seed ApplicationParameters: %s', app_param.decode('utf-8'))
         _, _, content = await self.app.express_interest(
-            f'/{node}/seed', app_param=json.dumps(request, ensure_ascii=False).encode('utf-8'),
+            f'/{node}/seed', app_param=app_param,
             must_be_fresh=True, can_be_prefix=True, lifetime=90000)
         response = bytes(content or b'').decode('utf-8')
         if not response.strip() or response.lstrip().startswith('Error:'):
