@@ -57,6 +57,12 @@ def function_prefix(name):
     return Name.to_str(Name.normalize('/' + name.lstrip('/')))
 
 
+def is_worker_node(node):
+    labels = node.metadata.labels or {}
+    return ('node-role.kubernetes.io/control-plane' not in labels
+            and 'node-role.kubernetes.io/master' not in labels)
+
+
 class SpyClient:
     def __init__(self, app):
         self.app = app
@@ -169,7 +175,8 @@ class Manager:
         if not isinstance(code, str) or not code.strip() or '\x00' in code:
             raise ValueError('content must be nonempty text without NUL characters')
         nodes = await asyncio.to_thread(self.api.list_node, _request_timeout=10)
-        resources = await self.spy.collect_resources([node.metadata.name for node in nodes.items])
+        worker_nodes = [node.metadata.name for node in nodes.items if is_worker_node(node)]
+        resources = await self.spy.collect_resources(worker_nodes)
         node = select_node(resources, preference)['node_name']
         response = await self.seed.create(node, request['name'], runtime, code)
         return f'Success: Function resources created on {node}. Seed response: {response}'
