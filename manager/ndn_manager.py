@@ -11,6 +11,7 @@ from ndn_routing import create_app
 
 LOG = logging.getLogger(__name__)
 FUNCTION_UPLOAD_PREFIX = '/registerer/functions'
+SEED_CODE_PREFIX = '/manager/functions'
 
 
 def normalize_preference(preference):
@@ -94,6 +95,10 @@ class SpyClient:
 class SeedClient:
     def __init__(self, app):
         self.app = app
+        self.publisher = SegmentedNodeWrapper(app, SEED_CODE_PREFIX, serve=True)
+
+    async def start(self):
+        await self.publisher.start()
 
     async def _send(self, node, request):
         app_param = json.dumps(request, ensure_ascii=False).encode('utf-8')
@@ -108,8 +113,9 @@ class SeedClient:
         return response
 
     async def create(self, node, name, runtime, code):
+        code_ref = await self.publisher.publish(name, code.encode('utf-8'))
         response = await self._send(node, {
-            'type': 'CREATE', 'name': name, 'runtime': runtime, 'content': code,
+            'type': 'CREATE', 'name': name, 'runtime': runtime, 'code_ref': code_ref,
         })
         if function_prefix(name) not in response.splitlines():
             raise RuntimeError(f'Unexpected Seed response on {node}: {response}')
@@ -155,6 +161,7 @@ class Manager:
 
     async def start(self):
         await self.function.start()
+        await self.seed.start()
 
     def on_interest(self, name, interest_param, app_param):
         for prefix, handler, freshness in (
