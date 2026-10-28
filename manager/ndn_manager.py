@@ -5,10 +5,12 @@ from pathlib import Path
 
 from kubernetes import client, config
 from ndn.encoding import Name
+from segmented_node_wrapper import SegmentedNodeWrapper
 
 from ndn_routing import create_app
 
 LOG = logging.getLogger(__name__)
+FUNCTION_UPLOAD_PREFIX = '/registerer/functions'
 
 
 def normalize_preference(preference):
@@ -121,17 +123,23 @@ class SeedClient:
 
 
 class FunctionClient:
-    def __init__(self, app):
-        self.app = app
+    def __init__(self, app, upload_prefix):
+        self.segmented = SegmentedNodeWrapper(app, upload_prefix, serve=False)
 
-    async def fetch_code(self, name):
-        prefix = function_prefix(name).rstrip('/') + '/code'
-        LOG.info('Fetching function code: %s', prefix)
-        _, _, content = await self.app.express_interest(
-            prefix, must_be_fresh=True, can_be_prefix=False, lifetime=6000)
-        code = bytes(content or b'').decode('utf-8')
+    async def start(self):
+        await self.segmented.start()
+
+    async def fetch_code(self, code_ref):
+        if not isinstance(code_ref, str) or not code_ref:
+            raise ValueError('code_ref must be a nonempty name')
+        LOG.info('Fetching segmented function code: %s', code_ref)
+        content = await self.segmented.fetch(code_ref, must_be_fresh=True)
+        try:
+            code = content.decode('utf-8')
+        except UnicodeDecodeError as exc:
+            raise ValueError('Function code must be UTF-8 text') from exc
         if not code.strip() or '\x00' in code or code.lstrip().startswith('Error:'):
-            raise ValueError(f'Invalid function code response from {prefix}')
+            raise ValueError(f'Invalid function code response from {code_ref}')
         return code
 
 
@@ -142,8 +150,11 @@ class Manager:
         self.namespace = namespace
         self.spy = SpyClient(app)
         self.seed = SeedClient(app)
-        self.function = FunctionClient(app)
+        self.function = FunctionClient(app, FUNCTION_UPLOAD_PREFIX)
         self.tasks = set()
+
+    async def start(self):
+        await self.function.start()
 
     def on_interest(self, name, interest_param, app_param):
         for prefix, handler, freshness in (
@@ -169,9 +180,7 @@ class Manager:
         runtime = request.get('runtime')
         if not isinstance(runtime, str) or not runtime.strip():
             raise ValueError('runtime is required')
-        code = request.get('content')
-        if code is None or (isinstance(code, str) and not code.strip()):
-            code = await self.function.fetch_code(request['name'])
+        code = await self.function.fetch_code(request.get('code_ref'))
         if not isinstance(code, str) or not code.strip() or '\x00' in code:
             raise ValueError('content must be nonempty text without NUL characters')
         nodes = await asyncio.to_thread(self.api.list_node, _request_timeout=10)
@@ -218,7 +227,7 @@ def main():
     manager = Manager(app, client.CoreV1Api(), namespace)
     app.route('/Manager')(manager.on_interest)
     try:
-        app.run_forever()
+        app.run_forever(after_start=manager.start())
     except KeyboardInterrupt:
         LOG.info('Manager stopped')
 
