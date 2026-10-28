@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kubernetes import client, config
 from ndn.encoding import Name
+from ndn.types import InterestNack, InterestTimeout
 from segmented_node_wrapper import SegmentedNodeWrapper
 
 from ndn_routing import create_app
@@ -12,6 +13,7 @@ from ndn_routing import create_app
 LOG = logging.getLogger(__name__)
 FUNCTION_UPLOAD_PREFIX = '/registerer/functions'
 SEED_CODE_PREFIX = '/manager/functions'
+CODE_FETCH_RETRY_TIMEOUT = 90
 
 
 def normalize_preference(preference):
@@ -139,7 +141,16 @@ class FunctionClient:
         if not isinstance(code_ref, str) or not code_ref:
             raise ValueError('code_ref must be a nonempty name')
         LOG.info('Fetching segmented function code: %s', code_ref)
-        content = await self.fetcher.fetch(code_ref, must_be_fresh=True)
+        deadline = asyncio.get_running_loop().time() + CODE_FETCH_RETRY_TIMEOUT
+        while True:
+            try:
+                content = await self.fetcher.fetch(code_ref, must_be_fresh=True)
+                break
+            except (InterestNack, InterestTimeout) as exc:
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise
+                LOG.warning('Cannot fetch %s yet (%s); retrying', code_ref, exc)
+                await asyncio.sleep(2)
         try:
             code = content.decode('utf-8')
         except UnicodeDecodeError as exc:
