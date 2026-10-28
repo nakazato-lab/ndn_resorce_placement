@@ -114,10 +114,11 @@ class SeedClient:
             raise RuntimeError(f'Seed on {node} rejected request: {response}')
         return response
 
-    async def create(self, node, name, runtime, code):
+    async def create(self, node, name, runtime, code, requirements):
         code_ref = await self.publisher.publish(name, code.encode('utf-8'))
         response = await self._send(node, {
             'type': 'CREATE', 'name': name, 'runtime': runtime, 'code_ref': code_ref,
+            'requirements': requirements,
         })
         if function_prefix(name) not in response.splitlines():
             raise RuntimeError(f'Unexpected Seed response on {node}: {response}')
@@ -198,6 +199,7 @@ class Manager:
         runtime = request.get('runtime')
         if not isinstance(runtime, str) or not runtime.strip():
             raise ValueError('runtime is required')
+        requirements = request.get('requirements', [])
         code = await self.function.fetch_code(request.get('code_ref'))
         if not isinstance(code, str) or not code.strip() or '\x00' in code:
             raise ValueError('content must be nonempty text without NUL characters')
@@ -205,7 +207,7 @@ class Manager:
         worker_nodes = [node.metadata.name for node in nodes.items if is_worker_node(node)]
         resources = await self.spy.collect_resources(worker_nodes)
         node = select_node(resources, preference)['node_name']
-        response = await self.seed.create(node, request['name'], runtime, code)
+        response = await self.seed.create(node, request['name'], runtime, code, requirements)
         return f'Success: Function resources created on {node}. Seed response: {response}'
 
     def get_delete_node(self, prefix):
