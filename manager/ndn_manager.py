@@ -124,16 +124,16 @@ class SeedClient:
 
 class FunctionClient:
     def __init__(self, app, upload_prefix):
-        self.segmented = SegmentedNodeWrapper(app, upload_prefix, serve=False)
+        self.fetcher = SegmentedNodeWrapper(app, upload_prefix, serve=False)
 
     async def start(self):
-        await self.segmented.start()
+        await self.fetcher.start()
 
     async def fetch_code(self, code_ref):
         if not isinstance(code_ref, str) or not code_ref:
             raise ValueError('code_ref must be a nonempty name')
         LOG.info('Fetching segmented function code: %s', code_ref)
-        content = await self.segmented.fetch(code_ref, must_be_fresh=True)
+        content = await self.fetcher.fetch(code_ref, must_be_fresh=True)
         try:
             code = content.decode('utf-8')
         except UnicodeDecodeError as exc:
