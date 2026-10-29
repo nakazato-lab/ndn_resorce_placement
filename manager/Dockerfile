@@ -7,10 +7,12 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
     netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir python-ndn kubernetes
+RUN pip install --no-cache-dir python-ndn kubernetes \
+    "segmented-node-wrapper @ git+https://github.com/nakazato-lab/segmented-node-wrapper.git@034eb70d957638ce45a9bb883c9d35994197f93d"
 
 COPY ndn_routing.py /app/
 COPY manager/ndn_manager.py /app/

@@ -5,10 +5,15 @@ from pathlib import Path
 
 from kubernetes import client, config
 from ndn.encoding import Name
+from ndn.types import InterestNack, InterestTimeout
+from segmented_node_wrapper import SegmentedNodeWrapper
 
 from ndn_routing import create_app
 
 LOG = logging.getLogger(__name__)
+FUNCTION_UPLOAD_PREFIX = '/registerer/functions'
+SEED_CODE_PREFIX = '/manager/functions'
+CODE_FETCH_RETRY_TIMEOUT = 90
 
 
 def normalize_preference(preference):
@@ -92,6 +97,10 @@ class SpyClient:
 class SeedClient:
     def __init__(self, app):
         self.app = app
+        self.publisher = SegmentedNodeWrapper(app, SEED_CODE_PREFIX, serve=True)
+
+    async def start(self):
+        await self.publisher.start()
 
     async def _send(self, node, request):
         app_param = json.dumps(request, ensure_ascii=False).encode('utf-8')
@@ -105,9 +114,11 @@ class SeedClient:
             raise RuntimeError(f'Seed on {node} rejected request: {response}')
         return response
 
-    async def create(self, node, name, runtime, code):
+    async def create(self, node, name, runtime, code, requirements):
+        code_ref = await self.publisher.publish(name, code.encode('utf-8'))
         response = await self._send(node, {
-            'type': 'CREATE', 'name': name, 'runtime': runtime, 'content': code,
+            'type': 'CREATE', 'name': name, 'runtime': runtime, 'code_ref': code_ref,
+            'requirements': requirements,
         })
         if function_prefix(name) not in response.splitlines():
             raise RuntimeError(f'Unexpected Seed response on {node}: {response}')
@@ -121,17 +132,32 @@ class SeedClient:
 
 
 class FunctionClient:
-    def __init__(self, app):
-        self.app = app
+    def __init__(self, app, upload_prefix):
+        self.fetcher = SegmentedNodeWrapper(app, upload_prefix, serve=False)
 
-    async def fetch_code(self, name):
-        prefix = function_prefix(name).rstrip('/') + '/code'
-        LOG.info('Fetching function code: %s', prefix)
-        _, _, content = await self.app.express_interest(
-            prefix, must_be_fresh=True, can_be_prefix=False, lifetime=6000)
-        code = bytes(content or b'').decode('utf-8')
+    async def start(self):
+        await self.fetcher.start()
+
+    async def fetch_code(self, code_ref):
+        if not isinstance(code_ref, str) or not code_ref:
+            raise ValueError('code_ref must be a nonempty name')
+        LOG.info('Fetching segmented function code: %s', code_ref)
+        deadline = asyncio.get_running_loop().time() + CODE_FETCH_RETRY_TIMEOUT
+        while True:
+            try:
+                content = await self.fetcher.fetch(code_ref, must_be_fresh=True)
+                break
+            except (InterestNack, InterestTimeout) as exc:
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise
+                LOG.warning('Cannot fetch %s yet (%s); retrying', code_ref, exc)
+                await asyncio.sleep(2)
+        try:
+            code = content.decode('utf-8')
+        except UnicodeDecodeError as exc:
+            raise ValueError('Function code must be UTF-8 text') from exc
         if not code.strip() or '\x00' in code or code.lstrip().startswith('Error:'):
-            raise ValueError(f'Invalid function code response from {prefix}')
+            raise ValueError(f'Invalid function code response from {code_ref}')
         return code
 
 
@@ -142,8 +168,12 @@ class Manager:
         self.namespace = namespace
         self.spy = SpyClient(app)
         self.seed = SeedClient(app)
-        self.function = FunctionClient(app)
+        self.function = FunctionClient(app, FUNCTION_UPLOAD_PREFIX)
         self.tasks = set()
+
+    async def start(self):
+        await self.function.start()
+        await self.seed.start()
 
     def on_interest(self, name, interest_param, app_param):
         for prefix, handler, freshness in (
@@ -169,16 +199,15 @@ class Manager:
         runtime = request.get('runtime')
         if not isinstance(runtime, str) or not runtime.strip():
             raise ValueError('runtime is required')
-        code = request.get('content')
-        if code is None or (isinstance(code, str) and not code.strip()):
-            code = await self.function.fetch_code(request['name'])
+        requirements = request.get('requirements', [])
+        code = await self.function.fetch_code(request.get('code_ref'))
         if not isinstance(code, str) or not code.strip() or '\x00' in code:
             raise ValueError('content must be nonempty text without NUL characters')
         nodes = await asyncio.to_thread(self.api.list_node, _request_timeout=10)
         worker_nodes = [node.metadata.name for node in nodes.items if is_worker_node(node)]
         resources = await self.spy.collect_resources(worker_nodes)
         node = select_node(resources, preference)['node_name']
-        response = await self.seed.create(node, request['name'], runtime, code)
+        response = await self.seed.create(node, request['name'], runtime, code, requirements)
         return f'Success: Function resources created on {node}. Seed response: {response}'
 
     def get_delete_node(self, prefix):
@@ -218,7 +247,7 @@ def main():
     manager = Manager(app, client.CoreV1Api(), namespace)
     app.route('/Manager')(manager.on_interest)
     try:
-        app.run_forever()
+        app.run_forever(after_start=manager.start())
     except KeyboardInterrupt:
         LOG.info('Manager stopped')
 
