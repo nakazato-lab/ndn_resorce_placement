@@ -99,9 +99,6 @@ class SeedClient:
         self.app = app
         self.publisher = SegmentedNodeWrapper(app, SEED_CODE_PREFIX, serve=True)
 
-    async def start(self):
-        await self.publisher.start()
-
     async def _send(self, node, request):
         app_param = json.dumps(request, ensure_ascii=False).encode('utf-8')
         LOG.info('Sending %s to Seed on %s: %s', request['type'], node, request['name'])
@@ -135,9 +132,6 @@ class FunctionClient:
     def __init__(self, app, upload_prefix):
         self.fetcher = SegmentedNodeWrapper(app, upload_prefix, serve=False)
 
-    async def start(self):
-        await self.fetcher.start()
-
     async def fetch_code(self, code_ref):
         if not isinstance(code_ref, str) or not code_ref:
             raise ValueError('code_ref must be a nonempty name')
@@ -170,10 +164,6 @@ class Manager:
         self.seed = SeedClient(app)
         self.function = FunctionClient(app, FUNCTION_UPLOAD_PREFIX)
         self.tasks = set()
-
-    async def start(self):
-        await self.function.start()
-        await self.seed.start()
 
     def on_interest(self, name, interest_param, app_param):
         for prefix, handler, freshness in (
@@ -247,7 +237,7 @@ def main():
     manager = Manager(app, client.CoreV1Api(), namespace)
     app.route('/Manager')(manager.on_interest)
     try:
-        app.run_forever(after_start=manager.start())
+        app.run_forever()
     except KeyboardInterrupt:
         LOG.info('Manager stopped')
 
