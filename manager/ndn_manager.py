@@ -108,27 +108,23 @@ class SeedClient:
         LOG.info('Seed ApplicationParameters: %s', app_param.decode('utf-8'))
         _, _, content = await self.app.express_interest(
             f'/{node}/seed', app_param=app_param,
-            must_be_fresh=True, can_be_prefix=True, lifetime=90000)
+            must_be_fresh=True, can_be_prefix=True, lifetime=4000)
         response = bytes(content or b'').decode('utf-8')
         if not response.strip() or response.lstrip().startswith('Error:'):
             raise RuntimeError(f'Seed on {node} rejected request: {response}')
+        if response.strip() != 'ACK':
+            raise RuntimeError(f'Unexpected Seed response on {node}: {response}')
         return response
 
     async def create(self, node, name, runtime, code, requirements):
         code_ref = await self.publisher.publish(name, code.encode('utf-8'))
-        response = await self._send(node, {
+        return await self._send(node, {
             'type': 'CREATE', 'name': name, 'runtime': runtime, 'code_ref': code_ref,
             'requirements': requirements,
         })
-        if function_prefix(name) not in response.splitlines():
-            raise RuntimeError(f'Unexpected Seed response on {node}: {response}')
-        return response
 
     async def delete(self, node, name):
-        response = await self._send(node, {'type': 'DELETE', 'name': name})
-        prefix = function_prefix(name)
-        if prefix in response.splitlines():
-            raise RuntimeError(f'Function {prefix} remains on {node}: {response}')
+        await self._send(node, {'type': 'DELETE', 'name': name})
 
 
 class FunctionClient:
