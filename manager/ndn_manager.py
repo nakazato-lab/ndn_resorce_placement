@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 from kubernetes import client, config
@@ -11,9 +12,14 @@ from segmented_node_wrapper import SegmentedNodeWrapper
 from ndn_routing import create_app
 
 LOG = logging.getLogger(__name__)
-FUNCTION_UPLOAD_PREFIX = '/registerer/functions'
 SEED_CODE_PREFIX = '/manager/functions'
 CODE_FETCH_RETRY_TIMEOUT = 90
+
+
+def router_code_prefix():
+    path = os.getenv('NFD_NAME_PATH', '/etc/ndn-config/ROUTER_NAME')
+    router_name = Path(path).read_text(encoding='utf-8').strip()
+    return router_name
 
 
 def normalize_preference(preference):
@@ -97,7 +103,9 @@ class SpyClient:
 class SeedClient:
     def __init__(self, app):
         self.app = app
-        self.publisher = SegmentedNodeWrapper(app, SEED_CODE_PREFIX, serve=True)
+        router_name = router_code_prefix()
+        self.upload_prefix = f'/{router_name}{SEED_CODE_PREFIX}'
+        self.publisher = SegmentedNodeWrapper(app, serve=True)
 
     async def _send(self, node, request):
         app_param = json.dumps(request, ensure_ascii=False).encode('utf-8')
@@ -112,7 +120,8 @@ class SeedClient:
         return response
 
     async def create(self, node, name, runtime, code, requirements):
-        code_ref = await self.publisher.publish(name, code.encode('utf-8'))
+        code_ref = await self.publisher.publish(
+            f'{self.upload_prefix}/{name.lstrip("/")}', code.encode('utf-8'))
         response = await self._send(node, {
             'type': 'CREATE', 'name': name, 'runtime': runtime, 'code_ref': code_ref,
             'requirements': requirements,
@@ -129,12 +138,10 @@ class SeedClient:
 
 
 class FunctionClient:
-    def __init__(self, app, upload_prefix):
-        self.fetcher = SegmentedNodeWrapper(app, upload_prefix, serve=False)
+    def __init__(self, app):
+        self.fetcher = SegmentedNodeWrapper(app)
 
     async def fetch_code(self, code_ref):
-        if not isinstance(code_ref, str) or not code_ref:
-            raise ValueError('code_ref must be a nonempty name')
         LOG.info('Fetching segmented function code: %s', code_ref)
         deadline = asyncio.get_running_loop().time() + CODE_FETCH_RETRY_TIMEOUT
         while True:
@@ -162,7 +169,7 @@ class Manager:
         self.namespace = namespace
         self.spy = SpyClient(app)
         self.seed = SeedClient(app)
-        self.function = FunctionClient(app, FUNCTION_UPLOAD_PREFIX)
+        self.function = FunctionClient(app)
         self.tasks = set()
 
     def on_interest(self, name, interest_param, app_param):
