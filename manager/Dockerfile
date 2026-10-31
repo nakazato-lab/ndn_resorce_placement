@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir python-ndn kubernetes \
-    "segmented-node-wrapper @ git+https://github.com/nakazato-lab/segmented-node-wrapper.git@cc0d5c98f7b7c2b3940a164c7c6987af043cb4ae"
+    "segmented-node-wrapper @ git+https://github.com/nakazato-lab/segmented-node-wrapper.git@7f5dec9645ec7f068fe6673c7215f765dab5edca"
 
 COPY ndn_routing.py /app/
 COPY manager/ndn_manager.py /app/
