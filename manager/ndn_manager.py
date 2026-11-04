@@ -34,22 +34,65 @@ def normalize_preference(preference):
     return result
 
 
-def select_node(resources, preference):
+DEFAULT_WEIGHT_PREFERENCE = float(os.getenv('SCORE_WEIGHT_PREFERENCE', '1.0'))
+DEFAULT_WEIGHT_BALANCE = float(os.getenv('SCORE_WEIGHT_BALANCE', '1.0'))
+PREFERENCE_DELTA = {
+    'high': float(os.getenv('PREFERENCE_DELTA_HIGH', '0.15')),      # 想定増分: +15%
+    'medium': float(os.getenv('PREFERENCE_DELTA_MEDIUM', '0.10')),  # 想定増分: +10%
+    'low': float(os.getenv('PREFERENCE_DELTA_LOW', '0.05')),        # 想定増分: +5%
+}
+
+
+def select_node(resources, preference, weight_preference=DEFAULT_WEIGHT_PREFERENCE, weight_balance=DEFAULT_WEIGHT_BALANCE):
     weights = {'high': 3, 'medium': 2, 'low': 1}
     cpu_weight = weights[preference['cpu']]
     memory_weight = weights[preference['memory']]
     bandwidth_weight = weights[preference['bandwidth']]
 
+    # 1. 従来手法: リソース優先度(preference)と空き容量に基づくスコア (preference_score)
     def score(node):
         return (cpu_weight * node.get('cpu_score', 0)
                 + memory_weight * node.get('mem_score', 0)
                 + bandwidth_weight * node.get('bandwidth_score', 0)
                 ) / (cpu_weight + memory_weight + bandwidth_weight)
 
+    # 2. BalancedResourceAllocationに基づく均等化スコア:
+    #    各ノードの現在の使用率(%)に新規機能のPreference(要求量)による想定増分を加算し、
+    #    配置後の3リソース(CPU, メモリ, 帯域)の使用率比率が均等になるノードに高いスコアを与える。
+    def balance_score(node):
+        def get_current_fraction(key_score, key_usage, key_fraction):
+            if key_fraction in node:
+                return float(node[key_fraction])
+            if key_usage in node:
+                return float(node[key_usage]) / 100.0
+            # Spyの resource_score(usage) = max(0, int((80 - usage) / 80 * 100)) から使用率(%)を逆算
+            score_val = float(node.get(key_score, 0))
+            usage = max(0.0, 80.0 - (score_val * 80.0 / 100.0))
+            return usage / 100.0
+
+        # 新規関数のPreferenceに応じた想定増分を加え、配置後の予測使用率割合(0.0〜1.0)を算出
+        f_cpu = min(1.0, get_current_fraction('cpu_score', 'cpu_usage', 'fraction_cpu') + PREFERENCE_DELTA[preference['cpu']])
+        f_mem = min(1.0, get_current_fraction('mem_score', 'mem_usage', 'fraction_mem') + PREFERENCE_DELTA[preference['memory']])
+        f_bw = min(1.0, get_current_fraction('bandwidth_score', 'bandwidth_usage', 'fraction_bw') + PREFERENCE_DELTA[preference['bandwidth']])
+
+        # 3リソース(CPU, メモリ, 帯域)のペア間差の平均を算出 (差が小さいほど均等)
+        diff = (abs(f_cpu - f_mem) + abs(f_mem - f_bw) + abs(f_bw - f_cpu)) / 3.0
+        # 差が小さいほど高得点 (最大100点)
+        return max(0.0, 100.0 - diff * 100.0)
+
+    # 3. 2つのscore関数に重みづけ(初期値1対1)でこの2つのscoreを考慮した総合スコア
+    def combined_score(node):
+        total_weight = weight_preference + weight_balance
+        if total_weight == 0:
+            return 0.0
+        return (weight_preference * score(node) + weight_balance * balance_score(node)) / total_weight
+
+    # ノード選択は従来通り preference_score (score関数) で決定
     selected = max(resources, key=score, default=None)
     if selected is not None:
-        LOG.info('Selected node: %s (score: %.2f, preference: %s)',
-                 selected['node_name'], score(selected), preference)
+        LOG.info('Selected node: %s (score: %.2f, balance: %.2f, combined: %.2f, preference: %s)',
+                 selected['node_name'], score(selected), balance_score(selected),
+                 combined_score(selected), preference)
     return selected
 
 
