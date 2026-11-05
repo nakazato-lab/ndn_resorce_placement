@@ -164,13 +164,18 @@ class SeedClient:
             raise RuntimeError(f'Unexpected Seed response on {node}: {response}')
         return response
 
-    async def create(self, node, name, runtime, code, requirements):
+    async def create(self, node, name, runtime, code, requirements, zip_content=None, source=None):
         code_ref = await self.publisher.publish(
             f'{self.upload_prefix}/{name.lstrip("/")}', code.encode('utf-8'))
-        return await self._send(node, {
+        request = {
             'type': 'CREATE', 'name': name, 'runtime': runtime, 'code_ref': code_ref,
             'requirements': requirements,
-        })
+        }
+        if zip_content is not None:
+            request['zip_content'] = await self.publisher.publish(
+                f'{self.upload_prefix}/{name.lstrip("/")}/package', zip_content)
+            request['source'] = source
+        return await self._send(node, request)
 
     async def delete(self, node, name):
         await self._send(node, {'type': 'DELETE', 'name': name})
@@ -180,18 +185,20 @@ class FunctionClient:
     def __init__(self, app):
         self.fetcher = SegmentedNodeWrapper(app)
 
-    async def fetch_code(self, code_ref):
-        LOG.info('Fetching segmented function code: %s', code_ref)
+    async def fetch_content(self, content_ref):
+        LOG.info('Fetching segmented content: %s', content_ref)
         deadline = asyncio.get_running_loop().time() + CODE_FETCH_RETRY_TIMEOUT
         while True:
             try:
-                content = await self.fetcher.fetch(code_ref, must_be_fresh=True)
-                break
+                return await self.fetcher.fetch(content_ref, must_be_fresh=True)
             except (InterestNack, InterestTimeout) as exc:
                 if asyncio.get_running_loop().time() >= deadline:
                     raise
-                LOG.warning('Cannot fetch %s yet (%s); retrying', code_ref, exc)
+                LOG.warning('Cannot fetch %s yet (%s); retrying', content_ref, exc)
                 await asyncio.sleep(2)
+
+    async def fetch_code(self, code_ref):
+        content = await self.fetch_content(code_ref)
         try:
             code = content.decode('utf-8')
         except UnicodeDecodeError as exc:
@@ -236,6 +243,16 @@ class Manager:
         if not isinstance(runtime, str) or not runtime.strip():
             raise ValueError('runtime is required')
         requirements = request.get('requirements', [])
+        package = {}
+        zip_ref = request.get('zip_content')
+        if zip_ref:
+            if not isinstance(zip_ref, str):
+                raise ValueError('zip_content must be an NDN name')
+            source = request.get('source')
+            if not isinstance(source, str) or not source.strip():
+                raise ValueError('source is required when zip_content is provided')
+            package['zip_content'] = await self.function.fetch_content(zip_ref)
+            package['source'] = source
         code = await self.function.fetch_code(request.get('code_ref'))
         if not isinstance(code, str) or not code.strip() or '\x00' in code:
             raise ValueError('content must be nonempty text without NUL characters')
@@ -243,7 +260,8 @@ class Manager:
         worker_nodes = [node.metadata.name for node in nodes.items if is_worker_node(node)]
         resources = await self.spy.collect_resources(worker_nodes)
         node = select_node(resources, preference)['node_name']
-        response = await self.seed.create(node, request['name'], runtime, code, requirements)
+        # **package is expanded so create() receives zip_content and source as arguments.
+        response = await self.seed.create(node, request['name'], runtime, code, requirements, **package)
         return f'Success: Function resources created on {node}. Seed response: {response}'
 
     def get_delete_node(self, prefix):
