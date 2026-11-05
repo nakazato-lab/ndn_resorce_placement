@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+import os
 import re
 import time
 from urllib.request import ProxyHandler, build_opener
@@ -14,13 +15,14 @@ TARGET = re.compile(
 )
 
 def parse_metrics(text):
+    interface = os.environ.get('NETWORK_INTERFACE', 'ens18')
     metrics = {}
     for line in text.splitlines():
         match = TARGET.match(line)
         if match:
             metric, device, raw = match.groups()
             device = json.loads(device)
-            if device != 'ens18':
+            if device != interface:
                 continue
             value = float(raw)
             if math.isfinite(value) and value >= 0:

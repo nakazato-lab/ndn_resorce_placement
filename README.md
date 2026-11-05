@@ -13,6 +13,8 @@ score = max(0, int((80 - usage) / 80 × 100))
 
 帯域は `ens18` の容量（現在は 1 Gbps）に対する送受信帯域の合計使用率を求め、CPU・メモリと同じ式でスコア化する:
 
+監視対象のインターフェースは環境変数 `NETWORK_INTERFACE` で変更できる（例: `NETWORK_INTERFACE=eth0`）。未設定の場合は `ens18` を使用する。
+
 ```text
 usage = (in_bps + out_bps) / capacity × 100
 bandwidth_score = max(0, int((80 - usage) / 80 × 100))
