@@ -164,7 +164,7 @@ class SeedClient:
             raise RuntimeError(f'Unexpected Seed response on {node}: {response}')
         return response
 
-    async def create(self, node, name, runtime, code, requirements, zip_content=None, source=None):
+    async def create(self, node, name, runtime, code, requirements, zip_content=None, source_file=None):
         code_ref = await self.publisher.publish(
             f'{self.upload_prefix}/{name.lstrip("/")}', code.encode('utf-8'))
         request = {
@@ -174,7 +174,7 @@ class SeedClient:
         if zip_content is not None:
             request['zip_content'] = await self.publisher.publish(
                 f'{self.upload_prefix}/{name.lstrip("/")}/package', zip_content)
-            request['source'] = source
+            request['source'] = source_file
         return await self._send(node, request)
 
     async def delete(self, node, name):
@@ -248,11 +248,11 @@ class Manager:
         if zip_ref:
             if not isinstance(zip_ref, str):
                 raise ValueError('zip_content must be an NDN name')
-            source = request.get('source')
-            if not isinstance(source, str) or not source.strip():
+            source_file = request.get('source')
+            if not isinstance(source_file, str) or not source_file.strip():
                 raise ValueError('source is required when zip_content is provided')
             package['zip_content'] = await self.function.fetch_content(zip_ref)
-            package['source'] = source
+            package['source_file'] = source_file
         code = await self.function.fetch_code(request.get('code_ref'))
         if not isinstance(code, str) or not code.strip() or '\x00' in code:
             raise ValueError('content must be nonempty text without NUL characters')
@@ -260,7 +260,7 @@ class Manager:
         worker_nodes = [node.metadata.name for node in nodes.items if is_worker_node(node)]
         resources = await self.spy.collect_resources(worker_nodes)
         node = select_node(resources, preference)['node_name']
-        # **package is expanded so create() receives zip_content and source as arguments.
+        # **package is expanded so create() receives zip_content and source_file as arguments.
         response = await self.seed.create(node, request['name'], runtime, code, requirements, **package)
         return f'Success: Function resources created on {node}. Seed response: {response}'
 
