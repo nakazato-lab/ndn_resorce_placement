@@ -174,16 +174,17 @@ class SeedClient:
 
     @tracer.start_as_current_span('manager.publish.function')
     async def create(self, node, name, runtime, code, requirements, zip_content=None, source_file=None):
-        code_ref = await self.publisher.publish(
-            f'{self.upload_prefix}/{name.lstrip("/")}', code.encode('utf-8'))
         request = {
-            'type': 'CREATE', 'name': name, 'runtime': runtime, 'code_ref': code_ref,
+            'type': 'CREATE', 'name': name, 'runtime': runtime,
             'requirements': requirements,
         }
         if zip_content is not None:
             request['zip_content'] = await self.publisher.publish(
                 f'{self.upload_prefix}/{name.lstrip("/")}/package', zip_content)
             request['source'] = source_file
+        else:
+            request['code_ref'] = await self.publisher.publish(
+                f'{self.upload_prefix}/{name.lstrip("/")}', code.encode('utf-8'))
         return await self._send(node, request)
 
     async def delete(self, node, name):
@@ -260,6 +261,7 @@ class Manager:
             raise ValueError('runtime is required')
         requirements = request.get('requirements', [])
         package = {}
+        code = None
         zip_ref = request.get('zip_content')
         if zip_ref:
             if not isinstance(zip_ref, str):
@@ -269,9 +271,10 @@ class Manager:
                 raise ValueError('source is required when zip_content is provided')
             package['zip_content'] = await self.function.fetch_content(zip_ref)
             package['source_file'] = source_file
-        code = await self.function.fetch_code(request.get('code_ref'))
-        if not isinstance(code, str) or not code.strip() or '\x00' in code:
-            raise ValueError('content must be nonempty text without NUL characters')
+        else:
+            code = await self.function.fetch_code(request.get('code_ref'))
+            if not isinstance(code, str) or not code.strip() or '\x00' in code:
+                raise ValueError('content must be nonempty text without NUL characters')
         with tracer.start_as_current_span('manager.collect.resources'):
             nodes = await asyncio.to_thread(self.api.list_node, _request_timeout=10)
             worker_nodes = [node.metadata.name for node in nodes.items if is_worker_node(node)]
