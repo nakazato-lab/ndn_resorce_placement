@@ -10,8 +10,13 @@ from ndn.types import InterestNack, InterestTimeout
 from segmented_node_wrapper import SegmentedNodeWrapper
 
 from ndn_routing import create_app
+from opentelemetry import trace
+from opentelemetry.context import Context
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from tracing import setup_tracing
 
 LOG = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 SEED_CODE_PREFIX = '/manager/functions'
 CODE_FETCH_RETRY_TIMEOUT = 90
 
@@ -151,19 +156,23 @@ class SeedClient:
         self.publisher = SegmentedNodeWrapper(app, serve=True)
 
     async def _send(self, node, request):
-        app_param = json.dumps(request, ensure_ascii=False).encode('utf-8')
-        LOG.info('Sending %s to Seed on %s: %s', request['type'], node, request['name'])
-        LOG.info('Seed ApplicationParameters: %s', app_param.decode('utf-8'))
-        _, _, content = await self.app.express_interest(
-            f'/{node}/seed', app_param=app_param,
-            must_be_fresh=True, can_be_prefix=True, lifetime=4000)
-        response = bytes(content or b'').decode('utf-8')
-        if not response.strip() or response.lstrip().startswith('Error:'):
-            raise RuntimeError(f'Seed on {node} rejected request: {response}')
-        if response.strip() != 'ACK':
-            raise RuntimeError(f'Unexpected Seed response on {node}: {response}')
-        return response
+        with tracer.start_as_current_span('manager.seed.request', kind=trace.SpanKind.CLIENT,
+                                         attributes={'k8s.node.name': node}):
+            TraceContextTextMapPropagator().inject(request)
+            app_param = json.dumps(request, ensure_ascii=False).encode('utf-8')
+            LOG.info('Sending %s to Seed on %s: %s', request['type'], node, request['name'])
+            LOG.info('Seed ApplicationParameters: %s', app_param.decode('utf-8'))
+            _, _, content = await self.app.express_interest(
+                f'/{node}/seed', app_param=app_param,
+                must_be_fresh=True, can_be_prefix=True, lifetime=4000)
+            response = bytes(content or b'').decode('utf-8')
+            if not response.strip() or response.lstrip().startswith('Error:'):
+                raise RuntimeError(f'Seed on {node} rejected request: {response}')
+            if response.strip() != 'ACK':
+                raise RuntimeError(f'Unexpected Seed response on {node}: {response}')
+            return response
 
+    @tracer.start_as_current_span('manager.publish.function')
     async def create(self, node, name, runtime, code, requirements, zip_content=None, source_file=None):
         code_ref = await self.publisher.publish(
             f'{self.upload_prefix}/{name.lstrip("/")}', code.encode('utf-8'))
@@ -185,7 +194,9 @@ class FunctionClient:
     def __init__(self, app):
         self.fetcher = SegmentedNodeWrapper(app)
 
+    @tracer.start_as_current_span('manager.fetch.content')
     async def fetch_content(self, content_ref):
+        trace.get_current_span().set_attribute('ndn.name', content_ref)
         LOG.info('Fetching segmented content: %s', content_ref)
         deadline = asyncio.get_running_loop().time() + CODE_FETCH_RETRY_TIMEOUT
         while True:
@@ -231,7 +242,12 @@ class Manager:
 
     async def respond(self, name, app_param, handler, freshness):
         try:
-            message = await handler(parse_request(app_param))
+            request = parse_request(app_param)
+            parent = TraceContextTextMapPropagator().extract(request, context=Context())
+            with tracer.start_as_current_span(f'manager.{handler.__name__}', context=parent,
+                                             kind=trace.SpanKind.SERVER,
+                                             attributes={'ndn.function.name': request['name']}):
+                message = await handler(request)
         except Exception as exc:
             LOG.exception('Request failed: %s', Name.to_str(name))
             message = f'Error: {type(exc).__name__}: {exc}'
@@ -256,10 +272,13 @@ class Manager:
         code = await self.function.fetch_code(request.get('code_ref'))
         if not isinstance(code, str) or not code.strip() or '\x00' in code:
             raise ValueError('content must be nonempty text without NUL characters')
-        nodes = await asyncio.to_thread(self.api.list_node, _request_timeout=10)
-        worker_nodes = [node.metadata.name for node in nodes.items if is_worker_node(node)]
-        resources = await self.spy.collect_resources(worker_nodes)
-        node = select_node(resources, preference)['node_name']
+        with tracer.start_as_current_span('manager.collect.resources'):
+            nodes = await asyncio.to_thread(self.api.list_node, _request_timeout=10)
+            worker_nodes = [node.metadata.name for node in nodes.items if is_worker_node(node)]
+            resources = await self.spy.collect_resources(worker_nodes)
+        with tracer.start_as_current_span('manager.select.node') as span:
+            node = select_node(resources, preference)['node_name']
+            span.set_attribute('k8s.node.name', node)
         # **package is expanded so create() receives zip_content and source_file as arguments.
         response = await self.seed.create(node, request['name'], runtime, code, requirements, **package)
         return f'Success: Function resources created on {node}. Seed response: {response}'
@@ -294,6 +313,15 @@ class Manager:
 
 
 def main():
+    provider = setup_tracing('manager')
+    try:
+        run()
+    finally:
+        if provider is not None:
+            provider.shutdown()
+
+
+def run():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
     config.load_incluster_config()
     namespace = Path('/var/run/secrets/kubernetes.io/serviceaccount/namespace').read_text().strip()
