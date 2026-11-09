@@ -129,16 +129,11 @@ class SpyClient:
     async def _get_resource(self, node_name):
         prefix = f'/{node_name}/spy/resource'
         try:
-            with tracer.start_as_current_span('manager.spy.request', kind=trace.SpanKind.CLIENT,
-                                             attributes={'k8s.node.name': node_name, 'ndn.name': prefix}):
-                parameters = {}
-                TraceContextTextMapPropagator().inject(parameters)
-                _, _, content = await self.app.express_interest(
-                    prefix, app_param=json.dumps(parameters).encode('utf-8') if parameters else None,
-                    must_be_fresh=True, can_be_prefix=False, lifetime=2000)
-                resource = json.loads(bytes(content).decode('utf-8'))
-                resource['node_name'] = node_name
-                return resource
+            _, _, content = await self.app.express_interest(
+                prefix, must_be_fresh=True, can_be_prefix=False, lifetime=2000)
+            resource = json.loads(bytes(content).decode('utf-8'))
+            resource['node_name'] = node_name
+            return resource
         except Exception as exc:
             LOG.warning('Cannot get resources from %s: %s: %s', prefix, type(exc).__name__, exc)
             return None
