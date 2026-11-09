@@ -3,45 +3,78 @@
 
 ## 計算ロジック
 
+参考文献に基づき、CPU等の計算リソースは **75〜80% を超えると処理能力の低下がみられる** ため、本システムでは **80% を安全上限（実効最大容量）** とみなし、80% を超えないようにスコアリング・配置判定を行います（環境変数 `SAFE_CAPACITY_LIMIT` で変更可能、デフォルト: `80.0`）。
+
 ### Spy
 
-Node の CPU・メモリの使用率（%）を、それぞれ以下の式で空き容量のスコア（0〜100）に変換:
+Spy はホストの `/proc`（`psutil`）および `node-exporter` から各ノードの**絶対的なリソース量（総量・使用量・空き量）**と**80%安全上限モデルに基づく実効空き割合**を取得し、Dataパケットとして返却します。
+
+#### 80%安全上限モデルによる実効空き割合の計算
+使用率（%）が 80% 以上に達したノードは実質的な空き容量ゼロ（0.0）とし、0%〜80% の範囲を 1.0〜0.0 にスケールします。
 
 ```text
-score = max(0, int((80 - usage) / 80 × 100))
+effective_free_ratio = max(0.0, (80.0 - usage_percent) / 80.0)
 ```
 
-帯域は `ens18` の容量（現在は 1 Gbps）に対する送受信帯域の合計使用率を求め、CPU・メモリと同じ式でスコア化する:
+#### 取得メトリクス
+- **CPU**:
+  - `total_cores`: 総論理コア数（`psutil.cpu_count(logical=True)`）
+  - `used_cores`: 実効使用コア数（`(cpu_percent / 100) × total_cores`）
+  - `free_cores`: 実効空きコア数（`total_cores - used_cores`）
+  - `effective_free_cores`: 80%安全上限に基づく実効空きコア数（`max(0, total_cores × 0.8 - used_cores)`）
+  - `cpu_free_ratio`: 実効空き割合（`effective_free_ratio(cpu_usage_percent)`）
+  - `cpu_usage_ratio`: 使用割合（`used_cores / total_cores`）
+- **メモリ**:
+  - `total_bytes`: 総物理メモリ量（`psutil.virtual_memory().total`）
+  - `used_bytes`: 使用メモリ量（`total_bytes - available`）
+  - `free_bytes`: 利用可能メモリ量（`psutil.virtual_memory().available`）
+  - `effective_free_bytes`: 80%安全上限に基づく実効空きメモリ量（`max(0, total_bytes × 0.8 - used_bytes)`）
+  - `mem_free_ratio`: 実効空き割合（`effective_free_ratio(mem_usage_percent)`）
+  - `mem_usage_ratio`: 使用割合（`used_bytes / total_bytes`）
+- **帯域**:
+  - `capacity_bps`: インターフェース最大容量（デフォルト 1 Gbps）
+  - `used_bps`: 実効送受信帯域（`in_bps + out_bps`）
+  - `free_bps`: 空き帯域（`capacity_bps - used_bps`）
+  - `effective_free_bps`: 80%安全上限に基づく実効空き帯域（`max(0, capacity_bps × 0.8 - used_bps)`）
+  - `bandwidth_free_ratio`: 実効空き割合（`effective_free_ratio(usage_percent)`）
+  - `bandwidth_usage_ratio`: 使用割合（`used_bps / capacity_bps`）
 
-監視対象のインターフェースは環境変数 `NETWORK_INTERFACE` で変更できる（例: `NETWORK_INTERFACE=eth0`）。未設定の場合は `ens18` を使用する。
+監視対象のインターフェースは環境変数 `NETWORK_INTERFACE` で変更できます（例: `NETWORK_INTERFACE=eth0`、未設定時は `ens18`）。
 
-```text
-usage = (in_bps + out_bps) / capacity × 100
-bandwidth_score = max(0, int((80 - usage) / 80 × 100))
-```
+---
 
 ### Manager
 
-Manager は関数の登録要求（`/Manager/register`）を受け取ると、各ノードの Spy から収集したメトリクスを基にノードの評価を行う。
-評価および最適な配置アルゴリズム模索のため、以下の3つの計算手法が実装。
+Manager は関数の登録要求（`/Manager/register`）を受け取ると、各ノードの Spy から収集したメトリクスを基にノードの評価を行います。
+評価および最適な配置アルゴリズム模索のため、以下の3つの計算手法が実装されています。
+（※現在の配置ノード決定は、従来通り **手法1（`score`）** を用いて行われ、ログにすべてのスコアが出力されます）
 
-#### 手法1: リソース優先度・空き容量重視スコア（`score` / preference_score）
-CPU・メモリ・帯域の優先度を重み（`high`: 3、`medium`: 2、`low`: 1、省略時は`medium`）に変換し、各ノードの空き容量スコアを加重平均する。`/Manager/register` の `preference` には `bandwidth` も指定できる。
+#### 手法1: リソース優先度・実効空き割合重視スコア（`score` / preference_score）
+CPU・メモリ・帯域の優先度を重み（`high`: 3、`medium`: 2、`low`: 1、省略時は`medium`）に変換し、80%安全上限モデルに基づく各ノードの**実効空き割合（`free_ratio`、0〜100点換算）**を加重平均する。`/Manager/register` の `preference` には `bandwidth` も指定できる。
+使用率 80% 以上のノードは実質空き容量なし（0点）となります。
 
 ```text
-score = (cpu_score × cpu_weight + mem_score × memory_weight + bandwidth_score × bandwidth_weight) / (cpu_weight + memory_weight + bandwidth_weight)
+score = (cpu_free_ratio × 100 × cpu_weight + mem_free_ratio × 100 × memory_weight + bw_free_ratio × 100 × bandwidth_weight) / (cpu_weight + memory_weight + bandwidth_weight)
 ```
 
 #### 手法2: リソース均等化スコア（`balance_score` / BalancedResourceAllocation）
-Kubernetes の `NodeResourcesBalancedAllocation` の思想に基づき、リソース（CPU・メモリ・帯域）の使用率比率が均等になる（特定リソースの偏りや断片化を防ぐ）ノードに高いスコアを与える計算式。
-新規関数の `preference`（要求の高さ）を配置による想定増分（`high`: +15%, `medium`: +10%, `low`: +5%）として各リソースの現在使用率に加え、配置後の予測使用率割合（0.0〜1.0）の差の小ささをスコア化する（最大100点）。
+Kubernetes の `NodeResourcesBalancedAllocation` の思想に基づき、各ノードの**絶対的な空きコア数・空きメモリ量・空き帯域量**と、新規関数の `preference`（要求の高さ）から割り当てられる**絶対要求リソース量（$\Delta$）**を用いて、配置後の3リソース使用率比率が均等になるノードに高いスコアを与える計算式（最大100点）。
 
 ```text
-# 現在の使用率割合 (Spyのスコアから逆算): fraction_current = max(0, 80 - score × 0.8) / 100
-# 想定増分: delta = high: 0.15, medium: 0.10, low: 0.05
-f_cpu = min(1.0, f_cpu_current + delta_cpu)
-f_mem = min(1.0, f_mem_current + delta_mem)
-f_bw  = min(1.0, f_bw_current + delta_bw)
+# 想定要求リソース量 (Preferenceによる絶対値設定):
+# CPU: high 1.0コア, medium 0.5コア, low 0.2コア
+# メモリ: high 1GiB, medium 512MiB, low 256MiB
+# 帯域: high 100Mbps, medium 50Mbps, low 20Mbps
+
+# 80%安全上限チェック:
+# 配置後の使用率が80%を超える場合 (実効空き容量 < 要求量) は性能低下領域に入るため 0 点
+if eff_free_cores < req_cores or eff_free_mem < req_mem or eff_free_bw < req_bw:
+    return 0
+
+# 配置後の予測使用率割合 (0.0〜1.0)
+f_cpu = (total_cores - free_cores + req_cores) / total_cores
+f_mem = (total_mem - free_mem + req_mem) / total_mem
+f_bw  = (capacity_bps - free_bw + req_bw) / capacity_bps
 
 diff = (|f_cpu - f_mem| + |f_mem - f_bw| + |f_bw - f_cpu|) / 3
 balance_score = max(0, 100 - diff × 100)
@@ -53,5 +86,3 @@ balance_score = max(0, 100 - diff × 100)
 ```text
 combined_score = (weight_preference × score + weight_balance × balance_score) / (weight_preference + weight_balance)
 ```
-
-いずれの手法においても、総合スコアが最も高いノードに関数を配置する。

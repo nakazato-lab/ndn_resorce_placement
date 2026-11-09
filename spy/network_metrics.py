@@ -39,7 +39,7 @@ class NetworkMonitor:
         with self._opener.open(self.url, timeout=5) as response:
             return parse_metrics(response.read().decode('utf-8'))
 
-    def calculate_rates(self):
+    def get_bandwidth_metrics(self):
         previous = self._fetch_metrics()
         time.sleep(SAMPLE_INTERVAL_SECONDS)
         current = self._fetch_metrics()
@@ -54,7 +54,27 @@ class NetworkMonitor:
                 if rates['in_bps'] is not None and rates['out_bps'] is not None else None)
         capacity = MAX_BANDWIDTH_BPS
         if capacity is None or capacity <= 0 or used is None:
-            return None
-        usage = used / capacity * 100
-        LOG.info('bandwidth usage: %.2f%%', usage)
-        return usage
+            return {
+                'capacity_bps': MAX_BANDWIDTH_BPS,
+                'used_bps': 0.0,
+                'free_bps': float(MAX_BANDWIDTH_BPS),
+                'usage_percent': 0.0,
+                'usage_ratio': 0.0,
+                'free_ratio': 1.0,
+            }
+        used_bps = min(float(used), float(capacity))
+        free_bps = max(0.0, float(capacity) - used_bps)
+        usage_pct = (used_bps / capacity) * 100.0
+        LOG.info('bandwidth usage: %.2f%%', usage_pct)
+        return {
+            'capacity_bps': float(capacity),
+            'used_bps': round(used_bps, 2),
+            'free_bps': round(free_bps, 2),
+            'usage_percent': round(usage_pct, 2),
+            'usage_ratio': round(used_bps / capacity, 4),
+            'free_ratio': round(free_bps / capacity, 4),
+        }
+
+    def calculate_rates(self):
+        metrics = self.get_bandwidth_metrics()
+        return metrics['usage_percent']

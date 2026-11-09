@@ -41,10 +41,29 @@ def normalize_preference(preference):
 
 DEFAULT_WEIGHT_PREFERENCE = float(os.getenv('SCORE_WEIGHT_PREFERENCE', '1.0'))
 DEFAULT_WEIGHT_BALANCE = float(os.getenv('SCORE_WEIGHT_BALANCE', '1.0'))
-PREFERENCE_DELTA = {
-    'high': float(os.getenv('PREFERENCE_DELTA_HIGH', '0.15')),      # 想定増分: +15%
-    'medium': float(os.getenv('PREFERENCE_DELTA_MEDIUM', '0.10')),  # 想定増分: +10%
-    'low': float(os.getenv('PREFERENCE_DELTA_LOW', '0.05')),        # 想定増分: +5%
+
+# 参考文献に基づき、CPU等のリソースは75〜80%を超えると処理能力の低下がみられるため、
+# 80%を安全上限(実効最大容量)として空き容量・割合を評価する
+SAFE_CAPACITY_LIMIT = float(os.getenv('SAFE_CAPACITY_LIMIT', '80.0'))
+
+# 新規関数のPreferenceに応じた想定要求リソース量 (絶対値)
+# CPU (コア数), メモリ (Bytes), 帯域 (bps)
+PREFERENCE_DEMAND = {
+    'cpu': {
+        'high': float(os.getenv('DEMAND_CPU_HIGH', '1.0')),       # 1.0 コア
+        'medium': float(os.getenv('DEMAND_CPU_MEDIUM', '0.5')),   # 0.5 コア
+        'low': float(os.getenv('DEMAND_CPU_LOW', '0.2')),         # 0.2 コア
+    },
+    'memory': {
+        'high': float(os.getenv('DEMAND_MEM_HIGH', str(1024 * 1024 * 1024))),     # 1 GiB
+        'medium': float(os.getenv('DEMAND_MEM_MEDIUM', str(512 * 1024 * 1024))), # 512 MiB
+        'low': float(os.getenv('DEMAND_MEM_LOW', str(256 * 1024 * 1024))),       # 256 MiB
+    },
+    'bandwidth': {
+        'high': float(os.getenv('DEMAND_BW_HIGH', '100000000')),    # 100 Mbps
+        'medium': float(os.getenv('DEMAND_BW_MEDIUM', '50000000')), # 50 Mbps
+        'low': float(os.getenv('DEMAND_BW_LOW', '20000000')),       # 20 Mbps
+    },
 }
 
 
@@ -54,33 +73,95 @@ def select_node(resources, preference, weight_preference=DEFAULT_WEIGHT_PREFEREN
     memory_weight = weights[preference['memory']]
     bandwidth_weight = weights[preference['bandwidth']]
 
-    # 1. 従来手法: リソース優先度(preference)と空き容量に基づくスコア (preference_score)
+    # 1. リソース優先度(preference)と実効空き割合に基づくスコア (preference_score)
+    #    参考文献に基づく「CPU等は75〜80%を超えると処理能力の低下がみられる」という知見を踏まえ、
+    #    80%を安全上限(実効最大容量)として空き割合(0〜100点)を加重平均する。
+    #    使用率80%以上は実質的な空きゼロ(0点)とする。
     def score(node):
-        return (cpu_weight * node.get('cpu_score', 0)
-                + memory_weight * node.get('mem_score', 0)
-                + bandwidth_weight * node.get('bandwidth_score', 0)
-                ) / (cpu_weight + memory_weight + bandwidth_weight)
+        def extract_effective_free_score(key_free, key_ratio, key_usage, fallback_score_key, key_obj, obj_total, obj_used):
+            # Spy側で80%安全上限モデル (80 - usage)/80 として算出された free_ratio があれば直接利用
+            if key_free in node:
+                val = float(node[key_free])
+                return max(0.0, val * 100.0 if val <= 1.0 else val)
+            if key_ratio in node:
+                val = float(node[key_ratio])
+                return max(0.0, val * 100.0 if val <= 1.0 else val)
+            # 使用率(%)または使用率割合から 80% 安全上限モデルで算出
+            if key_usage in node:
+                val = float(node[key_usage])
+                usage_pct = val * 100.0 if val <= 1.0 else val
+                return max(0.0, (SAFE_CAPACITY_LIMIT - usage_pct) / SAFE_CAPACITY_LIMIT * 100.0)
+            # 絶対値オブジェクトから実測使用率を計算して 80% 上限で算出
+            obj = node.get(key_obj, {})
+            if obj_total in obj and obj_used in obj:
+                total_val = float(obj[obj_total])
+                used_val = float(obj[obj_used])
+                if total_val > 0:
+                    usage_pct = (used_val / total_val) * 100.0
+                    return max(0.0, (SAFE_CAPACITY_LIMIT - usage_pct) / SAFE_CAPACITY_LIMIT * 100.0)
+            if fallback_score_key in node:
+                return float(node[fallback_score_key])
+            return 0.0
+
+        cpu_free = extract_effective_free_score('cpu_free_ratio', 'cpu_ratio', 'cpu_usage_ratio', 'cpu_score', 'cpu', 'total_cores', 'used_cores')
+        mem_free = extract_effective_free_score('mem_free_ratio', 'mem_ratio', 'mem_usage_ratio', 'mem_score', 'memory', 'total_bytes', 'used_bytes')
+        bw_free = extract_effective_free_score('bandwidth_free_ratio', 'bandwidth_ratio', 'bandwidth_usage_ratio', 'bandwidth_score', 'bandwidth', 'capacity_bps', 'used_bps')
+
+        return (cpu_weight * cpu_free + memory_weight * mem_free + bandwidth_weight * bw_free) / (cpu_weight + memory_weight + bandwidth_weight)
 
     # 2. BalancedResourceAllocationに基づく均等化スコア:
-    #    各ノードの現在の使用率(%)に新規機能のPreference(要求量)による想定増分を加算し、
-    #    配置後の3リソース(CPU, メモリ, 帯域)の使用率比率が均等になるノードに高いスコアを与える。
+    #    各ノードの絶対的な空きコア数・空きメモリ量・空き帯域量を取得し、
+    #    新規関数の要求リソース量(Preferenceによる絶対値)を配置した後の
+    #    各リソースの使用率割合(fraction)が最も均等になるノードに高いスコアを与える。
+    #    なお、配置後の使用率が80%安全上限を超える場合は性能劣化領域に入るため0点とする。
     def balance_score(node):
-        def get_current_fraction(key_score, key_usage, key_fraction):
-            if key_fraction in node:
-                return float(node[key_fraction])
-            if key_usage in node:
-                return float(node[key_usage]) / 100.0
-            # Spyの resource_score(usage) = max(0, int((80 - usage) / 80 * 100)) から使用率(%)を逆算
-            score_val = float(node.get(key_score, 0))
-            usage = max(0.0, 80.0 - (score_val * 80.0 / 100.0))
-            return usage / 100.0
+        cpu_obj = node.get('cpu', {})
+        mem_obj = node.get('memory', {})
+        bw_obj = node.get('bandwidth', {})
 
-        # 新規関数のPreferenceに応じた想定増分を加え、配置後の予測使用率割合(0.0〜1.0)を算出
-        f_cpu = min(1.0, get_current_fraction('cpu_score', 'cpu_usage', 'fraction_cpu') + PREFERENCE_DELTA[preference['cpu']])
-        f_mem = min(1.0, get_current_fraction('mem_score', 'mem_usage', 'fraction_mem') + PREFERENCE_DELTA[preference['memory']])
-        f_bw = min(1.0, get_current_fraction('bandwidth_score', 'bandwidth_usage', 'fraction_bw') + PREFERENCE_DELTA[preference['bandwidth']])
+        free_cores = float(cpu_obj.get('free_cores', node.get('free_cores', 0.0)))
+        total_cores = float(cpu_obj.get('total_cores', node.get('total_cores', 1.0))) or 1.0
 
-        # 3リソース(CPU, メモリ, 帯域)のペア間差の平均を算出 (差が小さいほど均等)
+        free_mem = float(mem_obj.get('free_bytes', node.get('free_bytes', 0.0)))
+        total_mem = float(mem_obj.get('total_bytes', node.get('total_bytes', 1.0))) or 1.0
+
+        free_bw = float(bw_obj.get('free_bps', node.get('free_bps', 0.0)))
+        total_bw = float(bw_obj.get('capacity_bps', node.get('capacity_bps', 1_000_000_000.0))) or 1_000_000_000.0
+
+        # フォールバック処理 (絶対値オブジェクトが存在しない古いDataパケット用)
+        if free_cores == 0.0 and 'cpu_score' in node:
+            usage = max(0.0, SAFE_CAPACITY_LIMIT - (float(node['cpu_score']) * (SAFE_CAPACITY_LIMIT / 100.0))) / 100.0
+            total_cores = 4.0
+            free_cores = total_cores * (1.0 - usage)
+        if free_mem == 0.0 and 'mem_score' in node:
+            usage = max(0.0, SAFE_CAPACITY_LIMIT - (float(node['mem_score']) * (SAFE_CAPACITY_LIMIT / 100.0))) / 100.0
+            total_mem = 8.0 * 1024 * 1024 * 1024
+            free_mem = total_mem * (1.0 - usage)
+        if free_bw == 0.0 and 'bandwidth_score' in node:
+            usage = max(0.0, SAFE_CAPACITY_LIMIT - (float(node['bandwidth_score']) * (SAFE_CAPACITY_LIMIT / 100.0))) / 100.0
+            total_bw = 1_000_000_000.0
+            free_bw = total_bw * (1.0 - usage)
+
+        req_cores = PREFERENCE_DEMAND['cpu'][preference['cpu']]
+        req_mem = PREFERENCE_DEMAND['memory'][preference['memory']]
+        req_bw = PREFERENCE_DEMAND['bandwidth'][preference['bandwidth']]
+
+        # 80%安全上限での実効空き容量チェック:
+        # 配置によって使用率が80%を超える場合 (実効空き量 < 要求量)、性能低下を招くため配置不可 (スコア 0)
+        limit_ratio = SAFE_CAPACITY_LIMIT / 100.0
+        eff_free_cores = max(0.0, total_cores * limit_ratio - (total_cores - free_cores))
+        eff_free_mem = max(0.0, total_mem * limit_ratio - (total_mem - free_mem))
+        eff_free_bw = max(0.0, total_bw * limit_ratio - (total_bw - free_bw))
+
+        if eff_free_cores < req_cores or eff_free_mem < req_mem or eff_free_bw < req_bw:
+            return 0.0
+
+        # 配置後の各リソース予測使用率割合 (0.0〜1.0)
+        f_cpu = min(1.0, max(0.0, (total_cores - free_cores + req_cores) / total_cores))
+        f_mem = min(1.0, max(0.0, (total_mem - free_mem + req_mem) / total_mem))
+        f_bw = min(1.0, max(0.0, (total_bw - free_bw + req_bw) / total_bw))
+
+        # 3リソース(CPU, メモリ, 帯域)のペア間差の平均 (差が小さいほど均等)
         diff = (abs(f_cpu - f_mem) + abs(f_mem - f_bw) + abs(f_bw - f_cpu)) / 3.0
         # 差が小さいほど高得点 (最大100点)
         return max(0.0, 100.0 - diff * 100.0)
@@ -95,7 +176,7 @@ def select_node(resources, preference, weight_preference=DEFAULT_WEIGHT_PREFEREN
     # ノード選択は従来通り preference_score (score関数) で決定
     selected = max(resources, key=score, default=None)
     if selected is not None:
-        LOG.info('Selected node: %s (score: %.2f, balance: %.2f, combined: %.2f, preference: %s)',
+        LOG.info('Selected node: %s (preference_score: %.2f, balance_score: %.2f, combined_score: %.2f, preference: %s)',
                  selected['node_name'], score(selected), balance_score(selected),
                  combined_score(selected), preference)
     return selected
