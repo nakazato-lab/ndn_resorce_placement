@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 from pathlib import Path
 
 from kubernetes import client, config
@@ -20,11 +21,229 @@ tracer = trace.get_tracer(__name__)
 SEED_CODE_PREFIX = '/manager/functions'
 CODE_FETCH_RETRY_TIMEOUT = 90
 
+# ----------------------------------------------------------------
+# フィルタリング設定（環境変数で切り替え可能）
+# ----------------------------------------------------------------
+# NODE_FILTER_POLICY: 'ALL'=全ノード対象 (デフォルト/後方互換),
+#                     'NLSR'=NLSRコスト近傍フィルタのみ,
+#                     'RANDOM'=ランダムサンプリングのみ,
+#                     'HYBRID'=NLSRコスト近傍 + ランダムサンプリング (推奨)
+NODE_FILTER_POLICY = os.getenv('NODE_FILTER_POLICY', 'ALL')
+# NLSR近傍フィルタで残す上位ノード数 (低コスト上位M台)
+NLSR_TOP_M = int(os.getenv('NLSR_TOP_M', '10'))
+# ランダムサンプリングで最終的に問い合わせるノード数 (K台)
+SAMPLE_K = int(os.getenv('SAMPLE_NODE_COUNT', '5'))
+# NLSR Status DatasetのInterestタイムアウト (ms)
+NLSR_INTEREST_TIMEOUT = int(os.getenv('NLSR_INTEREST_TIMEOUT_MS', '3000'))
+# NLSR ルータプレフィックスのフォーマット (%s にルータ名が入る)
+# 例: /ndn/k8s/%C1.Router/ndn-router-0/nlsr/routing-table
+NLSR_ROUTER_PREFIX_FORMAT = os.getenv('NLSR_ROUTER_PREFIX_FORMAT',
+                                       '/ndn/k8s/%%C1.Router/%s/nlsr/routing-table')
+# NLSRルーティングテーブルのTLV type番号 (NLSR仕様に基づく)
+NLSR_RT_STATUS_TLV  = 145  # RouteTableEntry TLV type
+NLSR_NEXTHOP_TLV    = 146  # Nexthop TLV type
+NLSR_COST_TLV       = 149  # Cost TLV type
+
 
 def router_code_prefix():
     path = os.getenv('NFD_NAME_PATH', '/etc/ndn-config/ROUTER_NAME')
     router_name = Path(path).read_text(encoding='utf-8').strip()
     return router_name
+
+
+def parse_nlsr_routing_table(raw_bytes):
+    """NLSR Status Dataset (TLV) を簡易パースして宛先名→最小コストの辞書を返す。
+
+    NLSRルーティングテーブルのTLV構造（NLSR仕様より）:
+      RoutingTableStatus := RT-STATUS-TYPE TLV-LENGTH RouteTableEntry*
+      RouteTableEntry    := ROUTE-TABLE-ENTRY-TYPE TLV-LENGTH Name Nexthop*
+      Nexthop            := NEXTHOP-TYPE TLV-LENGTH Cost ...
+      Cost               := COST-TYPE TLV-LENGTH uint64
+
+    TLV type番号 (nlsr/tlv-nlsr.hpp):
+      RouteTableEntry = 145
+      Nexthop         = 146
+      Cost            = 149
+      Name            = 7 (ndn-cxx 標準)
+
+    戻り値: {宛先名プレフィックス(str): 最小累積コスト(float)} の辞書
+    """
+    NDN_NAME_TLV  = 7
+    RT_ENTRY_TLV  = NLSR_RT_STATUS_TLV   # 145
+    NEXTHOP_TLV   = NLSR_NEXTHOP_TLV     # 146
+    COST_TLV      = NLSR_COST_TLV        # 149
+
+    def read_varint(data, pos):
+        """NDN TLV の可変長 Type/Length を読む。戻り値: (値, 次のpos)"""
+        b = data[pos]
+        if b < 0xFD:
+            return b, pos + 1
+        elif b == 0xFD:
+            val = int.from_bytes(data[pos + 1:pos + 3], 'big')
+            return val, pos + 3
+        elif b == 0xFE:
+            val = int.from_bytes(data[pos + 1:pos + 5], 'big')
+            return val, pos + 5
+        else:
+            val = int.from_bytes(data[pos + 1:pos + 9], 'big')
+            return val, pos + 9
+
+    def read_tlv(data, pos):
+        """TLV ブロックを1つ読んで (type, value_bytes, 次のpos) を返す。"""
+        if pos >= len(data):
+            return None, None, pos
+        t, pos = read_varint(data, pos)
+        l, pos = read_varint(data, pos)
+        v = data[pos: pos + l]
+        return t, bytes(v), pos + l
+
+    def decode_name(value_bytes):
+        """Name TLV の value 部分を '/component1/component2' 形式のstrに変換する。"""
+        GENERIC_NAME_COMPONENT = 8
+        pos = 0
+        parts = []
+        while pos < len(value_bytes):
+            t, v, pos = read_tlv(value_bytes, pos)
+            if t is None:
+                break
+            if t == GENERIC_NAME_COMPONENT:
+                try:
+                    parts.append(v.decode('utf-8'))
+                except UnicodeDecodeError:
+                    parts.append(v.hex())
+        return '/' + '/'.join(parts) if parts else '/'
+
+    routing_table = {}  # {宛先名: 最小コスト}
+    data = bytes(raw_bytes)
+    pos = 0
+
+    # トップレベルのTLVを読み進める（RoutingTableStatus全体）
+    while pos < len(data):
+        t, v, pos = read_tlv(data, pos)
+        if t is None:
+            break
+        if t != RT_ENTRY_TLV:
+            continue
+
+        # RouteTableEntry の内側をパース: Name + Nexthop*
+        inner_pos = 0
+        dest_name = None
+        min_cost = float('inf')
+
+        while inner_pos < len(v):
+            inner_t, inner_v, inner_pos = read_tlv(v, inner_pos)
+            if inner_t is None:
+                break
+
+            if inner_t == NDN_NAME_TLV:
+                dest_name = decode_name(inner_v)
+
+            elif inner_t == NEXTHOP_TLV:
+                # Nexthop 内の Cost TLV を探す
+                nh_pos = 0
+                while nh_pos < len(inner_v):
+                    nh_t, nh_v, nh_pos = read_tlv(inner_v, nh_pos)
+                    if nh_t is None:
+                        break
+                    if nh_t == COST_TLV and nh_v:
+                        # Costはuint64のビッグエンディアン整数
+                        cost = int.from_bytes(nh_v, 'big')
+                        if cost < min_cost:
+                            min_cost = cost
+
+        if dest_name is not None and min_cost != float('inf'):
+            routing_table[dest_name] = min_cost
+
+    return routing_table
+
+
+def extract_router_name_from_code_ref(request):
+    """関数登録リクエストからクライアント接続先のルータ名を取得する。
+
+    優先順位:
+    1. request['client_router']: 明示的に指定された場合
+    2. request['code_ref']: '/{router_name}/registerer/...' の形式からパース
+    3. 取得不可の場合は None を返す（Managerのルータへフォールバック）
+    """
+    # 明示的な client_router フィールドが最優先
+    client_router = request.get('client_router')
+    if isinstance(client_router, str) and client_router.strip():
+        return client_router.strip().lstrip('/')
+
+    # code_ref から先頭コンポーネントを抽出
+    # 例: "/ndn-router-0/registerer/functions/average" → "ndn-router-0"
+    code_ref = request.get('code_ref', '')
+    if isinstance(code_ref, str) and code_ref.strip():
+        parts = code_ref.strip().lstrip('/').split('/')
+        if parts and parts[0]:
+            return parts[0]
+
+    return None
+
+
+def filter_candidate_nodes(node_names, routing_table, policy=None, top_m=None, sample_k=None):
+    """NLSRルーティングテーブルを使ってノードリストをフィルタリング・サンプリングする。
+
+    Args:
+        node_names: K8s ワーカーノード名のリスト (例: ['kube1', 'kube2', ...])
+        routing_table: parse_nlsr_routing_table() で得た {宛先名: コスト} の辞書
+        policy: フィルタリングポリシー ('ALL', 'NLSR', 'RANDOM', 'HYBRID')
+        top_m: NLSRフィルタで残す上位M台
+        sample_k: 最終的にサンプリングするK台
+
+    Returns:
+        フィルタリング後のノード名リスト
+
+    NLSRルーティングテーブルでのノード名マッチング:
+        NLSR が保持する宛先名はルータプレフィックス (例: '/ndn-router-0')。
+        本研究環境では nlsr.conf の `advertising { prefix /@ROUTER@ }` により
+        ルータ名がそのまま名前空間上の宛先プレフィックスとなる。
+        K8sノード名 (例: 'kube1') と NLSR 上のルータ名は必ずしも一致しないため、
+        ノード名に含まれる文字列で部分マッチを行うフォールバックも備える。
+    """
+    _policy = policy or NODE_FILTER_POLICY
+    _top_m = top_m or NLSR_TOP_M
+    _sample_k = sample_k or SAMPLE_K
+
+    # ALLは従来通り全ノードを対象とする
+    if _policy == 'ALL':
+        return list(node_names)
+
+    # ---- NLSR近傍フィルタリング ----
+    if _policy in ('NLSR', 'HYBRID'):
+        # NLSRルーティングテーブルの各エントリのキー (宛先名) を使って
+        # K8sのノード名とのマッチングを試みる
+        # マッチング戦略:
+        #   1. 宛先名にノード名が部分文字列として含まれる場合に対応付け
+        #   2. 対応付けできなかったノードはコスト無限大として末尾に並べる
+        node_costs = []
+        for node in node_names:
+            matched_cost = float('inf')
+            for dest_name, cost in routing_table.items():
+                # ルータ名 (例 'ndn-router-0') が宛先名に含まれるか、
+                # またはノード名 (例 'kube1') が宛先名に含まれるか
+                if node in dest_name or any(part in node for part in dest_name.strip('/').split('/')):
+                    if cost < matched_cost:
+                        matched_cost = cost
+            node_costs.append((node, matched_cost))
+
+        # コスト昇順でソートし上位M台を抽出
+        node_costs.sort(key=lambda x: x[1])
+        if len(node_costs) > _top_m:
+            node_costs = node_costs[:_top_m]
+            LOG.info('NLSR filter: top-%d nodes selected (out of %d)', _top_m, len(node_names))
+        candidates = [n for n, _ in node_costs]
+        LOG.info('NLSR filter result: %s', candidates)
+    else:
+        candidates = list(node_names)
+
+    # ---- ランダムサンプリング ----
+    if _policy in ('RANDOM', 'HYBRID'):
+        if len(candidates) > _sample_k:
+            candidates = random.sample(candidates, _sample_k)
+            LOG.info('Random sampling: %d nodes sampled from %d candidates', _sample_k, len(candidates))
+
+    return candidates
 
 
 def normalize_preference(preference):
@@ -229,6 +448,62 @@ class SpyClient:
         return resources
 
 
+class NlsrClient:
+    """NLSRルーティングテーブルをNDN Interest/Dataで取得するクライアント。
+
+    NDNの標準仕様（NLSR Status Dataset）に基づき、
+    指定されたルータのNLSRに対してInterestを送信し、
+    そのルータ視点での全宛先への最短累積コスト一覧をDataパケットとして受信する。
+
+    活用シナリオ:
+        Manager がクライアント（Registerer）の接続先ルータ名を受け取り、
+        そのルータ配下のNLSRに問い合わせることで、
+        「クライアントから見た各ノードへのネットワーク距離」を取得できる。
+        これにより、クライアントから最もネットワーク的に近いノード群を
+        スコアリング前にフィルタリングできる（フィルタリングフェーズ）。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def get_routing_table(self, router_name):
+        """指定ルータのNLSRルーティングテーブルをDataパケットとして取得する。
+
+        Args:
+            router_name: 問い合わせ対象のルータ名 (例: 'ndn-router-0')
+
+        Returns:
+            {宛先名: 最小累積コスト} の辞書。取得失敗時は空辞書。
+
+        NDNプレフィックス:
+            NLSR_ROUTER_PREFIX_FORMAT 環境変数で制御可能。デフォルト:
+            /ndn/k8s/%C1.Router/<router_name>/nlsr/routing-table
+            例: /ndn/k8s/%C1.Router/ndn-router-0/nlsr/routing-table
+        """
+        # %% → % のエスケープを元に戻してルータ名を埋め込む
+        prefix = NLSR_ROUTER_PREFIX_FORMAT.replace('%%', '%') % router_name
+        LOG.info('Fetching NLSR routing table from: %s', prefix)
+        try:
+            _, _, content = await self.app.express_interest(
+                prefix,
+                must_be_fresh=True,
+                can_be_prefix=True,
+                lifetime=NLSR_INTEREST_TIMEOUT,
+            )
+            raw = bytes(content or b'')
+            routing_table = parse_nlsr_routing_table(raw)
+            LOG.info('NLSR routing table fetched: %d entries from %s', len(routing_table), router_name)
+            for dest, cost in list(routing_table.items())[:5]:
+                LOG.debug('  NLSR entry: %s -> cost=%s', dest, cost)
+            return routing_table
+        except (InterestNack, InterestTimeout) as exc:
+            LOG.warning('Cannot fetch NLSR routing table from %s (%s): %s', prefix, type(exc).__name__, exc)
+            return {}
+        except Exception as exc:
+            LOG.warning('Unexpected error fetching NLSR routing table from %s: %s', prefix, exc)
+            return {}
+
+
 class SeedClient:
     def __init__(self, app):
         self.app = app
@@ -307,6 +582,7 @@ class Manager:
         self.api = api
         self.namespace = namespace
         self.spy = SpyClient(app)
+        self.nlsr = NlsrClient(app)
         self.seed = SeedClient(app)
         self.function = FunctionClient(app)
         self.tasks = set()
@@ -356,10 +632,53 @@ class Manager:
             code = await self.function.fetch_code(request.get('code_ref'))
             if not isinstance(code, str) or not code.strip() or '\x00' in code:
                 raise ValueError('content must be nonempty text without NUL characters')
-        with tracer.start_as_current_span('manager.collect.resources'):
+
+        with tracer.start_as_current_span('manager.filter.nodes') as filter_span:
+            # K8sワーカーノード一覧を取得
             nodes = await asyncio.to_thread(self.api.list_node, _request_timeout=10)
             worker_nodes = [node.metadata.name for node in nodes.items if is_worker_node(node)]
-            resources = await self.spy.collect_resources(worker_nodes)
+            filter_span.set_attribute('filter.policy', NODE_FILTER_POLICY)
+            filter_span.set_attribute('nodes.total', len(worker_nodes))
+
+            # フィルタリング: NLSR近傍フィルタ + ランダムサンプリング
+            # 環境変数 NODE_FILTER_POLICY で動作を制御:
+            #   'ALL'    : フィルタなし (後方互換・デフォルト)
+            #   'NLSR'   : クライアントルータのNLSR累積コストで上位M台に絞り込み
+            #   'RANDOM' : ランダムにK台をサンプリング
+            #   'HYBRID' : NLSR近傍 → ランダムサンプリングの2段階フィルタ (推奨)
+            if NODE_FILTER_POLICY != 'ALL':
+                # クライアントが接続しているルータ名を取得
+                # (code_ref の先頭コンポーネント or client_router フィールド)
+                client_router = extract_router_name_from_code_ref(request)
+
+                routing_table = {}
+                if client_router and NODE_FILTER_POLICY in ('NLSR', 'HYBRID'):
+                    LOG.info('Fetching NLSR routing table from client router: %s', client_router)
+                    routing_table = await self.nlsr.get_routing_table(client_router)
+                    if not routing_table:
+                        # NLSRが取得できなかった場合はManagerのルータへフォールバック
+                        LOG.warning(
+                            'NLSR routing table from client router "%s" is empty. '
+                            'Falling back to Manager router.', client_router)
+                        fallback_router = router_code_prefix()
+                        routing_table = await self.nlsr.get_routing_table(fallback_router)
+                elif NODE_FILTER_POLICY in ('NLSR', 'HYBRID'):
+                    # client_router が特定できない場合はManagerのルータを使う
+                    LOG.warning(
+                        'Could not determine client router from request. '
+                        'Using Manager router for NLSR lookup.')
+                    fallback_router = router_code_prefix()
+                    routing_table = await self.nlsr.get_routing_table(fallback_router)
+
+                candidate_nodes = filter_candidate_nodes(worker_nodes, routing_table)
+                filter_span.set_attribute('nodes.after_filter', len(candidate_nodes))
+                LOG.info('Node filtering: %d → %d nodes (policy=%s)',
+                         len(worker_nodes), len(candidate_nodes), NODE_FILTER_POLICY)
+            else:
+                candidate_nodes = worker_nodes
+
+        with tracer.start_as_current_span('manager.collect.resources'):
+            resources = await self.spy.collect_resources(candidate_nodes)
         with tracer.start_as_current_span('manager.select.node') as span:
             node = select_node(resources, preference)['node_name']
             span.set_attribute('k8s.node.name', node)

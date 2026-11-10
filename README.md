@@ -1,6 +1,38 @@
 ## アーキテクチャ
 ![manager-spy](docs/images/manager-spy.png)
 
+## 処理フロー（全体）
+
+関数登録要求（`/Manager/register`）を受信してから配置先ノードを決定するまでの3フェーズ：
+
+```text
+[ クライアント (Registerer) ]
+       │  Interest: /Manager/register
+       │  ApplicationParameters: { "code_ref": "/{client-router}/...", "preference": {...} }
+       ▼
+[ Manager ]
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ フェーズ1: フィルタリング（環境変数 NODE_FILTER_POLICY で制御）           │
+  │  'ALL'   : 全ノードを対象（デフォルト・後方互換）                         │
+  │  'NLSR'  : クライアント側ルータの NLSR に Interest を送信し               │
+  │            累積コスト（最短経路コスト）上位 M 台に絞り込む                │
+  │  'RANDOM': ランダムに K 台をサンプリング                                  │
+  │  'HYBRID': NLSR近傍フィルタ（上位 M 台）→ ランダムサンプリング（K 台）   │
+  └────────────────────────────┬────────────────────────────────────────────┘
+                               │ 候補ノード（K台）
+  ┌────────────────────────────▼────────────────────────────────────────────┐
+  │ フェーズ2: リソース収集                                                   │
+  │  候補ノードの Spy に Interest を並行送信 → リソース Dataパケット受信       │
+  └────────────────────────────┬────────────────────────────────────────────┘
+                               │
+  ┌────────────────────────────▼────────────────────────────────────────────┐
+  │ フェーズ3: スコアリング・ノード選定（select_node）                         │
+  │  3つの計算手法でスコアを算出、preference_score（手法1）で配置先を決定      │
+  └────────────────────────────┬────────────────────────────────────────────┘
+                               │
+[ 選定ノードの Seed ] へ Pod作成指示
+```
+
 ## 計算ロジック
 
 参考文献に基づき、CPU等の計算リソースは **75〜80% を超えると処理能力の低下がみられる** ため、本システムでは **80% を安全上限（実効最大容量）** とみなし、80% を超えないようにスコアリング・配置判定を行います（環境変数 `SAFE_CAPACITY_LIMIT` で変更可能、デフォルト: `80.0`）。
@@ -86,3 +118,43 @@ balance_score = max(0, 100 - diff × 100)
 ```text
 combined_score = (weight_preference × score + weight_balance × balance_score) / (weight_preference + weight_balance)
 ```
+
+---
+
+### フィルタリングフェーズ（NlsrClient）
+
+Managerは関数登録要求を受け取ると、スコアリング・リソース収集の**前段**にフィルタリングフェーズを実施できます。
+
+#### クライアント接続先ルータの特定
+
+関数登録 Interest の `ApplicationParameters` 内に含まれる `code_ref`（例: `/{router_name}/registerer/functions/...`）の先頭コンポーネントから、クライアントが接続しているルータ名を取得します（`client_router` フィールドによる明示的な指定も可能）。
+
+#### NLSR Status Dataset によるルーティングテーブル取得
+
+```text
+Interest: /ndn/k8s/%C1.Router/<client-router>/nlsr/routing-table
+Data   : TLV形式のルーティングテーブル
+         RouteTableEntry (type=145) × n:
+           Name (type=7)       ... 宛先プレフィックス
+           Nexthop (type=146):
+             Cost (type=149)   ... 最短累積コスト (uint64)
+```
+
+- NLSRはダイクストラ法でLSDB（Link State Database）から計算した**最短累積コスト**を保持しており、1回のInterestで取得可能。
+- 「クライアントのルータ」へ問い合わせることで、**クライアント視点の**ネットワーク距離を取得。
+
+#### 環境変数による制御
+
+| 環境変数 | デフォルト | 説明 |
+|---|---|---|
+| `NODE_FILTER_POLICY` | `ALL` | `ALL` / `NLSR` / `RANDOM` / `HYBRID` |
+| `NLSR_TOP_M` | `10` | NLSRフィルタで残す低コスト上位ノード数（M台） |
+| `SAMPLE_NODE_COUNT` | `5` | ランダムサンプリングで問い合わせるノード数（K台） |
+| `NLSR_INTEREST_TIMEOUT_MS` | `3000` | NLSRへのInterestタイムアウト（ms） |
+| `NLSR_ROUTER_PREFIX_FORMAT` | `/ndn/k8s/%%C1.Router/%s/nlsr/routing-table` | NLSRルータプレフィックスのフォーマット |
+
+#### フォールバック動作
+
+- NLSRからのData取得が失敗した場合は、Manager自身のルータのNLSRへフォールバック。
+- さらに失敗した場合は、フィルタなし（全ノード対象）で動作を継続。
+
