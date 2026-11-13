@@ -5,16 +5,11 @@ from pathlib import Path
 
 import psutil
 from ndn.encoding import Component
-from opentelemetry import trace
-from opentelemetry.context import Context
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from ndn_routing import create_app
 from network_metrics import NetworkMonitor
-from tracing import setup_tracing
 
 LOG = logging.getLogger(__name__)
-tracer = trace.get_tracer(__name__)
 
 
 # 参考文献に基づき、CPU等のリソースは75〜80%を超えると処理能力の低下がみられるため、
@@ -38,28 +33,25 @@ class Spy:
 
     def get_resource_payload(self):
         # 1. CPU (psutil)
-        with tracer.start_as_current_span('spy.measure.cpu'):
-            total_cores = float(psutil.cpu_count(logical=True) or 1)
-            cpu_usage_pct = float(psutil.cpu_percent(interval=0.1))
-            used_cores = round((cpu_usage_pct / 100.0) * total_cores, 2)
-            free_cores = max(0.0, round(total_cores - used_cores, 2))
-            cpu_usage_ratio = round(used_cores / total_cores, 4)
-            cpu_free_ratio = round(free_cores / total_cores, 4)
+        total_cores = float(psutil.cpu_count(logical=True) or 1)
+        cpu_usage_pct = float(psutil.cpu_percent(interval=0.1))
+        used_cores = round((cpu_usage_pct / 100.0) * total_cores, 2)
+        free_cores = max(0.0, round(total_cores - used_cores, 2))
+        cpu_usage_ratio = round(used_cores / total_cores, 4)
+        cpu_free_ratio = round(free_cores / total_cores, 4)
 
         # 2. メモリ (psutil)
-        with tracer.start_as_current_span('spy.measure.memory'):
-            vmem = psutil.virtual_memory()
-            total_mem_bytes = int(vmem.total)
-            free_mem_bytes = int(vmem.available)
-            used_mem_bytes = max(0, total_mem_bytes - free_mem_bytes)
-            mem_usage_pct = float(vmem.percent)
-            mem_usage_ratio = round(used_mem_bytes / total_mem_bytes, 4) if total_mem_bytes else 0.0
-            mem_free_ratio = round(free_mem_bytes / total_mem_bytes, 4) if total_mem_bytes else 1.0
+        vmem = psutil.virtual_memory()
+        total_mem_bytes = int(vmem.total)
+        free_mem_bytes = int(vmem.available)
+        used_mem_bytes = max(0, total_mem_bytes - free_mem_bytes)
+        mem_usage_pct = float(vmem.percent)
+        mem_usage_ratio = round(used_mem_bytes / total_mem_bytes, 4) if total_mem_bytes else 0.0
+        mem_free_ratio = round(free_mem_bytes / total_mem_bytes, 4) if total_mem_bytes else 1.0
 
         # 3. 帯域 (network_metrics)
         try:
-            with tracer.start_as_current_span('spy.measure.bandwidth'):
-                bw_info = self.network.get_bandwidth_metrics() if self.network else None
+            bw_info = self.network.get_bandwidth_metrics() if self.network else None
         except Exception as exc:
             LOG.warning('Network metrics unavailable: %s', exc)
             bw_info = None
@@ -142,27 +134,11 @@ class Spy:
         return json.dumps(payload, ensure_ascii=False).encode('utf-8')
 
     def on_interest(self, name, interest_param, app_param):
-        # ApplicationParameters append a digest after the resource component.
-        component = name[-2] if Component.get_type(name[-1]) == Component.TYPE_PARAMETERS_SHA256 else name[-1]
-        if Component.to_str(component) != 'resource':
-            return
-        parameters = json.loads(bytes(app_param)) if app_param else {}
-        parent = TraceContextTextMapPropagator().extract(parameters, context=Context())
-        with tracer.start_as_current_span('spy.handler', context=parent, kind=trace.SpanKind.SERVER,
-                                         attributes={'k8s.node.name': self.node_name}):
+        if Component.to_str(name[-1]) == 'resource':
             self.app.put_data(name, content=self.get_resource_payload(), freshness_period=1000)
 
 
 def main():
-    provider = setup_tracing('spy')
-    try:
-        run()
-    finally:
-        if provider is not None:
-            provider.shutdown()
-
-
-def run():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
     if Path('/host/proc').exists():
         psutil.PROCFS_PATH = '/host/proc'

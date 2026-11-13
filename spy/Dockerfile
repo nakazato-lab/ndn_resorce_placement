@@ -10,11 +10,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir python-ndn psutil \
-    opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+RUN pip install --no-cache-dir python-ndn psutil
 
 COPY ndn_routing.py /app/
-COPY spy/spy_agent.py manager/tracing.py /app/
+COPY spy/spy_agent.py /app/
 COPY spy/network_metrics.py /app/
 
 CMD ["/bin/bash", "-c", "\
