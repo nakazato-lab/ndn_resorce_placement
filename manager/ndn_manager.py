@@ -529,11 +529,14 @@ class SeedClient:
             return response
 
     @tracer.start_as_current_span('manager.publish.function')
-    async def create(self, node, name, runtime, code, requirements, zip_content=None, source_file=None):
+    async def create(self, node, name, runtime, code, requirements, zip_content=None, source_file=None,
+                     registerer_prefix=None):
         request = {
             'type': 'CREATE', 'name': name, 'runtime': runtime,
             'requirements': requirements,
         }
+        if registerer_prefix is not None:
+            request['registerer_prefix'] = registerer_prefix
         if zip_content is not None:
             request['zip_content'] = await self.publisher.publish(
                 f'{self.upload_prefix}/{name.lstrip("/")}/package', zip_content)
@@ -683,7 +686,9 @@ class Manager:
             node = select_node(resources, preference)['node_name']
             span.set_attribute('k8s.node.name', node)
         # **package is expanded so create() receives zip_content and source_file as arguments.
-        response = await self.seed.create(node, request['name'], runtime, code, requirements, **package)
+        response = await self.seed.create(
+            node, request['name'], runtime, code, requirements,
+            registerer_prefix=request.get('registerer_prefix'), **package)
         return f'Success: Function resources created on {node}. Seed response: {response}'
 
     def get_delete_node(self, prefix):
