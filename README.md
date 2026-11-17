@@ -39,7 +39,8 @@
 
 ### Spy
 
-Spy はホストの `/proc`（`psutil`）および `node-exporter` から各ノードの**絶対的なリソース量（総量・使用量・空き量）**と**80%安全上限モデルに基づく実効空き割合**を取得し、Dataパケットとして返却します。
+Spy は起動後、バックグラウンドタスクにおいて **0.5秒間隔で CPU・メモリ・帯域 の3つのリソースを並列サンプリング** し、**直近5秒間（10サンプル）の単純移動平均（SMA: Simple Moving Average）** を計算・保持します。
+Manager からリソース収集リクエスト（`/{node}/spy/resource` Interest）を受け取った際は、待機時間なし（即答）でこの直近5秒平均のメトリクスを Data パケットとして返却します。また、返却した Data パケットの内容はログに出力されます。
 
 #### 80%安全上限モデルによる実効空き割合の計算
 使用率（%）が 80% 以上に達したノードは実質的な空き容量ゼロ（0.0）とし、0%〜80% の範囲を 1.0〜0.0 にスケールします。
@@ -48,7 +49,15 @@ Spy はホストの `/proc`（`psutil`）および `node-exporter` から各ノ�
 effective_free_ratio = max(0.0, (80.0 - usage_percent) / 80.0)
 ```
 
-#### 取得メトリクス
+#### サンプリング設定（環境変数）
+
+| 環境変数 | デフォルト | 説明 |
+|---|---|---|
+| `SPY_SAMPLE_INTERVAL` | `0.5` | リソースサンプリング間隔（秒） |
+| `SPY_WINDOW_SECONDS` | `5.0` | 単純移動平均の窓長（秒） |
+| `SAFE_CAPACITY_LIMIT` | `80.0` | 実効安全上限（%） |
+
+#### 取得メトリクス（総量はハードウェア固定値、使用量・空き量は直近5秒平均）
 - **CPU**:
   - `total_cores`: 総論理コア数（`psutil.cpu_count(logical=True)`）
   - `used_cores`: 実効使用コア数（`(cpu_percent / 100) × total_cores`）
@@ -70,6 +79,9 @@ effective_free_ratio = max(0.0, (80.0 - usage_percent) / 80.0)
   - `effective_free_bps`: 80%安全上限に基づく実効空き帯域（`max(0, capacity_bps × 0.8 - used_bps)`）
   - `bandwidth_free_ratio`: 実効空き割合（`effective_free_ratio(usage_percent)`）
   - `bandwidth_usage_ratio`: 使用割合（`used_bps / capacity_bps`）
+- **メタデータ**:
+  - `timestamp`: サンプリング・計算時刻のUNIXエポック秒（データの鮮度証明）
+  - `sample_count`: 単純移動平均の計算に用いられたサンプル数（1〜10）
 
 監視対象のインターフェースは環境変数 `NETWORK_INTERFACE` で変更できます（例: `NETWORK_INTERFACE=eth0`、未設定時は `ens18`）。
 

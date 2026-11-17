@@ -34,10 +34,52 @@ class NetworkMonitor:
     def __init__(self, url='http://127.0.0.1:9100/metrics'):
         self.url = url
         self._opener = build_opener(ProxyHandler({}))
+        self._last_metrics = None
+        self._last_time = None
 
     def _fetch_metrics(self):
         with self._opener.open(self.url, timeout=5) as response:
             return parse_metrics(response.read().decode('utf-8'))
+
+    def sample_instant(self):
+        """ノンブロッキングで直前のサンプリング時からの送受信レート(bps)を算出する。
+        前回サンプリングがない初回は基準値のみ記録して0.0を返す。
+        """
+        now = time.time()
+        try:
+            current = self._fetch_metrics()
+        except Exception as exc:
+            LOG.warning('Failed to fetch network metrics: %s', exc)
+            return {
+                'used_bps': 0.0,
+                'usage_percent': 0.0,
+                'capacity_bps': float(MAX_BANDWIDTH_BPS),
+            }
+
+        rates = {}
+        if self._last_metrics is not None and self._last_time is not None:
+            dt = max(0.001, now - self._last_time)
+            for metric, field in (('receive_bytes_total', 'in_bps'),
+                                  ('transmit_bytes_total', 'out_bps')):
+                after, before = current.get(metric), self._last_metrics.get(metric)
+                rates[field] = ((after - before) * 8 / dt
+                                if after is not None and before is not None and after >= before else 0.0)
+        else:
+            rates = {'in_bps': 0.0, 'out_bps': 0.0}
+
+        self._last_metrics = current
+        self._last_time = now
+
+        used = rates.get('in_bps', 0.0) + rates.get('out_bps', 0.0)
+        capacity = float(MAX_BANDWIDTH_BPS)
+        used_bps = min(float(used), capacity)
+        usage_pct = (used_bps / capacity) * 100.0 if capacity > 0 else 0.0
+
+        return {
+            'used_bps': round(used_bps, 2),
+            'usage_percent': round(usage_pct, 2),
+            'capacity_bps': capacity,
+        }
 
     def get_bandwidth_metrics(self):
         previous = self._fetch_metrics()

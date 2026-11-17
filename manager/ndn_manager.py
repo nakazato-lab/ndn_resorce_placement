@@ -431,8 +431,10 @@ class SpyClient:
         try:
             _, _, content = await self.app.express_interest(
                 prefix, must_be_fresh=True, can_be_prefix=False, lifetime=2000)
-            resource = json.loads(bytes(content).decode('utf-8'))
+            raw_text = bytes(content).decode('utf-8')
+            resource = json.loads(raw_text)
             resource['node_name'] = node_name
+            LOG.info('[Spy Response] Received from %s: %s', prefix, raw_text)
             return resource
         except Exception as exc:
             LOG.warning('Cannot get resources from %s: %s: %s', prefix, type(exc).__name__, exc)
