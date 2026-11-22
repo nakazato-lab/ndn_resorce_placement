@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import time
 from pathlib import Path
 
 from kubernetes import client, config
@@ -426,8 +427,12 @@ class SpyClient:
     def __init__(self, app):
         self.app = app
 
+    @tracer.start_as_current_span('manager.spy.request', kind=trace.SpanKind.CLIENT)
     async def _get_resource(self, node_name):
         prefix = f'/{node_name}/spy/resource'
+        span = trace.get_current_span()
+        span.set_attribute('ndn.name', prefix)
+        span.set_attribute('k8s.node.name', node_name)
         try:
             _, _, content = await self.app.express_interest(
                 prefix, must_be_fresh=True, can_be_prefix=False, lifetime=2000)
@@ -437,6 +442,8 @@ class SpyClient:
             LOG.info('[Spy Response] Received from %s: %s', prefix, raw_text)
             return resource
         except Exception as exc:
+            span.record_exception(exc)
+            span.set_status(trace.StatusCode.ERROR, str(exc))
             LOG.warning('Cannot get resources from %s: %s: %s', prefix, type(exc).__name__, exc)
             return None
 
@@ -468,6 +475,7 @@ class NlsrClient:
     def __init__(self, app):
         self.app = app
 
+    @tracer.start_as_current_span('manager.nlsr.request', kind=trace.SpanKind.CLIENT)
     async def get_routing_table(self, router_name):
         """指定ルータのNLSRルーティングテーブルをDataパケットとして取得する。
 
@@ -484,6 +492,8 @@ class NlsrClient:
         """
         # %% → % のエスケープを元に戻してルータ名を埋め込む
         prefix = NLSR_ROUTER_PREFIX_FORMAT.replace('%%', '%') % router_name
+        span = trace.get_current_span()
+        span.set_attribute('ndn.name', prefix)
         LOG.info('Fetching NLSR routing table from: %s', prefix)
         try:
             _, _, content = await self.app.express_interest(
@@ -499,9 +509,13 @@ class NlsrClient:
                 LOG.debug('  NLSR entry: %s -> cost=%s', dest, cost)
             return routing_table
         except (InterestNack, InterestTimeout) as exc:
+            span.record_exception(exc)
+            span.set_status(trace.StatusCode.ERROR, str(exc))
             LOG.warning('Cannot fetch NLSR routing table from %s (%s): %s', prefix, type(exc).__name__, exc)
             return {}
         except Exception as exc:
+            span.record_exception(exc)
+            span.set_status(trace.StatusCode.ERROR, str(exc))
             LOG.warning('Unexpected error fetching NLSR routing table from %s: %s', prefix, exc)
             return {}
 
@@ -570,6 +584,7 @@ class FunctionClient:
                 LOG.warning('Cannot fetch %s yet (%s); retrying', content_ref, exc)
                 await asyncio.sleep(2)
 
+    @tracer.start_as_current_span('manager.fetch.code')
     async def fetch_code(self, code_ref):
         content = await self.fetch_content(code_ref)
         try:
@@ -604,17 +619,27 @@ class Manager:
                 break
 
     async def respond(self, name, app_param, handler, freshness):
+        received_at = time.time_ns()
+        parent = Context()
         try:
-            request = parse_request(app_param)
-            parent = TraceContextTextMapPropagator().extract(request, context=Context())
-            with tracer.start_as_current_span(f'manager.{handler.__name__}', context=parent,
-                                             kind=trace.SpanKind.SERVER,
-                                             attributes={'ndn.function.name': request['name']}):
+            carrier = json.loads(bytes(app_param))
+            if isinstance(carrier, dict):
+                parent = TraceContextTextMapPropagator().extract(carrier, context=parent)
+        except (ValueError, TypeError, UnicodeDecodeError):
+            pass
+        with tracer.start_as_current_span(
+                f'manager.{handler.__name__}', context=parent, kind=trace.SpanKind.SERVER,
+                start_time=received_at, attributes={'ndn.name': Name.to_str(name)}) as span:
+            try:
+                request = parse_request(app_param)
+                span.set_attribute('ndn.function.name', request['name'])
                 message = await handler(request)
-        except Exception as exc:
-            LOG.exception('Request failed: %s', Name.to_str(name))
-            message = f'Error: {type(exc).__name__}: {exc}'
-        self.app.put_data(name, content=message.encode('utf-8'), freshness_period=freshness)
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(trace.StatusCode.ERROR, str(exc))
+                LOG.exception('Request failed: %s', Name.to_str(name))
+                message = f'Error: {type(exc).__name__}: {exc}'
+            self.app.put_data(name, content=message.encode('utf-8'), freshness_period=freshness)
 
     async def register(self, request):
         preference = normalize_preference(request.get('preference', {}))
@@ -693,6 +718,7 @@ class Manager:
             registerer_prefix=request.get('registerer_prefix'), **package)
         return f'Success: Function resources created on {node}. Seed response: {response}'
 
+    @tracer.start_as_current_span('manager.find.function')
     def get_delete_node(self, prefix):
         pods = self.api.list_namespaced_pod(
             self.namespace, label_selector='managed-by=ndn-seed-python', _request_timeout=10).items
