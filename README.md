@@ -55,6 +55,7 @@ effective_free_ratio = max(0.0, (80.0 - usage_percent) / 80.0)
 |---|---|---|
 | `SPY_SAMPLE_INTERVAL` | `0.5` | リソースサンプリング間隔（秒） |
 | `SPY_WINDOW_SECONDS` | `5.0` | 単純移動平均の窓長（秒） |
+| `SPY_HEARTBEAT_INTERVAL` | `10.0` | ハートビートログ出力間隔（秒） |
 | `SAFE_CAPACITY_LIMIT` | `80.0` | 実効安全上限（%） |
 
 #### 取得メトリクス（総量はハードウェア固定値、使用量・空き量は直近5秒平均）
@@ -169,4 +170,71 @@ Data   : TLV形式のルーティングテーブル
 
 - NLSRからのData取得が失敗した場合は、Manager自身のルータのNLSRへフォールバック。
 - さらに失敗した場合は、フィルタなし（全ノード対象）で動作を継続。
+
+---
+
+## Interest 仕様（ApplicationParameters 命名規則とフォーマット）
+
+本システム間で送受信される Interest の `ApplicationParameters`（JSON）の命名規則およびデータ構造です。
+
+### 1. クライアント（Registerer） → Manager (`/Manager/register`)
+
+関数登録要求の Interest です。リソース要求は **抽象優先度（`preference`）** または **絶対値要求量（`demand`）** のどちらか一方、あるいは併用が可能です。
+
+```json
+{
+  "name": "image-filter",
+  "runtime": "python",
+  "requirements": ["numpy", "Pillow"],
+  "code_ref": "/ndn-router-0/registerer/functions/image-filter",
+  "registerer_prefix": "/ndn-router-0/registerer/functions/image-filter/status",
+
+  // 方式A: 抽象優先度指定 (ユーザーが詳細なリソース量を知らない場合)
+  // "high" (重み3), "medium" (重み2), "low" (重み1)
+  "preference": {
+    "cpu": "high",
+    "memory": "medium",
+    "bandwidth": "low"
+  },
+
+  // 方式B: 絶対値要求量指定 (詳細に指定したい場合)
+  // ※ demand のみ指定された場合、Manager が基準値から自動的に high/medium/low を逆算するため preference の併記は不要
+  "demand": {
+    "cpu": 0.8,             // CPUコア数 (float: 例 0.8 = 0.8コア)
+    "memory": 1073741824,   // メモリ量 (int/float: Bytes単位, 例 1073741824 = 1 GiB)
+    "bandwidth": 50000000   // 帯域幅 (int/float: bps単位, 例 50000000 = 50 Mbps)
+  }
+}
+```
+
+#### 環境変数による Registerer 側の指定（`function-utils/registerer`）
+- 抽象優先度: `FUNCTION_PREFERENCE_CPU`, `FUNCTION_PREFERENCE_MEMORY`, `FUNCTION_PREFERENCE_BANDWIDTH` (`high` / `medium` / `low`)
+- 絶対値要求量: `FUNCTION_DEMAND_CPU` (コア数), `FUNCTION_DEMAND_MEMORY` (Bytes), `FUNCTION_DEMAND_BANDWIDTH` (bps)
+
+---
+
+### 2. Manager → Seed (`/{node}/seed`)
+
+選定ノード上の Seed デーモンに対して Function Pod 作成を指示する Interest です。
+再配置機能との連携のため、Manager が配置選定に用いた **確定要求リソース量（`predicted_demand`）** が付与されます。
+
+```json
+{
+  "type": "CREATE",
+  "name": "image-filter",
+  "runtime": "python",
+  "requirements": ["numpy", "Pillow"],
+  "code_ref": "/ndn-router-0/manager/functions/image-filter",
+  "registerer_prefix": "/ndn-router-0/registerer/functions/image-filter/status",
+
+  // Manager が配置計算に使用した予測リソース要求量 (絶対値)
+  // 再配置機能の実装者は、Pod起動後の実測値とこの predicted_demand を比較して乖離を検知できる
+  "predicted_demand": {
+    "cpu": 0.8,
+    "memory": 1073741824,
+    "bandwidth": 50000000
+  }
+}
+```
+
 

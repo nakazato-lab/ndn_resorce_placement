@@ -24,6 +24,8 @@ SAMPLE_INTERVAL = float(os.getenv('SPY_SAMPLE_INTERVAL', '0.5'))
 WINDOW_SECONDS = float(os.getenv('SPY_WINDOW_SECONDS', '5.0'))
 MAX_SAMPLES = max(1, int(WINDOW_SECONDS / SAMPLE_INTERVAL))
 
+HEARTBEAT_INTERVAL = float(os.getenv('SPY_HEARTBEAT_INTERVAL', '10.0'))
+
 
 def resource_score(usage, limit=SAFE_CAPACITY_LIMIT):
     return max(0, int((limit - usage) / limit * 100))
@@ -48,6 +50,7 @@ class Spy:
         # 直近5秒間の単純移動平均用リングバッファ (0.5秒 * 10 = 5秒)
         self.samples = collections.deque(maxlen=MAX_SAMPLES)
         self.current_payload = None
+        self._last_heartbeat_time = 0.0
 
         # 初回サンプリングのベースライン作成 (差分測定の準備)
         psutil.cpu_percent(interval=None)
@@ -201,6 +204,19 @@ class Spy:
             'sample_count': n,
         }
         self.current_payload = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+
+        # 一定間隔(デフォルト10秒)ごとに最新の移動平均サマリを1行ログ出力 (ハートビート)
+        now = time.time()
+        if now - self._last_heartbeat_time >= HEARTBEAT_INTERVAL:
+            self._last_heartbeat_time = now
+            LOG.info(
+                '[Heartbeat] %.0fs SMA: CPU=%.1f%% (%.2f/%d cores), Mem=%.1f%% (%.1f/%d MB), BW=%.1f%% (%.2f/%d Mbps) [samples=%d]',
+                WINDOW_SECONDS,
+                avg_cpu_pct, used_cores, int(self.total_cores),
+                avg_mem_pct, avg_used_mem_bytes / (1024 * 1024), int(self.total_mem_bytes / (1024 * 1024)),
+                avg_bw_pct, avg_bw_used_bps / 1_000_000.0, int(self.capacity_bps / 1_000_000.0),
+                n
+            )
 
     async def _collection_loop(self):
         """0.5秒おきにリソースを並列サンプリングするバックグラウンドタスク。"""

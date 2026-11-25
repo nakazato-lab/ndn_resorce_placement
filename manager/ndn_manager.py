@@ -259,6 +259,65 @@ def normalize_preference(preference):
     return result
 
 
+def infer_preference_level(val, low_val, med_val, high_val):
+    """絶対値の要求リソース量から high / medium / low を自動判定する。
+    中間値(lowとmedの中間、medとhighの中間)をしきい値としてマッピング。
+    """
+    th_low_med = (low_val + med_val) / 2.0
+    th_med_high = (med_val + high_val) / 2.0
+    if val <= th_low_med:
+        return 'low'
+    elif val <= th_med_high:
+        return 'medium'
+    else:
+        return 'high'
+
+
+def resolve_resource_requirements(request):
+    """リクエストから preference (優先度) と demand (確定要求リソース量) を解決する。
+
+    1. demand (絶対値: cpuコア数, memoryバイト数, bandwidth bps) が指定されている場合:
+       - ユーザーが絶対値のみを指定した場合でも二重入力を防ぐため、Manager側で
+         その絶対値が high/medium/low のどれに相当するかを自動判定して preference を決定する。
+       - preference が明示的に併記されている場合は、ユーザー指定の優先度を尊重する。
+    2. demand が指定されていない場合 (従来通り):
+       - preference (high/medium/low) から PREFERENCE_DEMAND を引いて確定要求リソース量を算出。
+
+    戻り値: (preference: dict, demand: dict)
+    """
+    raw_demand = request.get('demand')
+    raw_pref = request.get('preference')
+
+    resolved_demand = {}
+    resolved_pref = {}
+
+    if isinstance(raw_demand, dict) and any(k in raw_demand for k in ('cpu', 'memory', 'bandwidth')):
+        for key in ('cpu', 'memory', 'bandwidth'):
+            low_v = PREFERENCE_DEMAND[key]['low']
+            med_v = PREFERENCE_DEMAND[key]['medium']
+            high_v = PREFERENCE_DEMAND[key]['high']
+
+            if key in raw_demand:
+                val = float(raw_demand[key])
+                resolved_demand[key] = max(0.0, val)
+                if isinstance(raw_pref, dict) and raw_pref.get(key) in ('high', 'medium', 'low'):
+                    resolved_pref[key] = raw_pref[key]
+                else:
+                    resolved_pref[key] = infer_preference_level(val, low_v, med_v, high_v)
+            else:
+                pref_val = raw_pref.get(key, 'medium') if isinstance(raw_pref, dict) else 'medium'
+                if pref_val not in ('high', 'medium', 'low'):
+                    pref_val = 'medium'
+                resolved_pref[key] = pref_val
+                resolved_demand[key] = PREFERENCE_DEMAND[key][pref_val]
+    else:
+        resolved_pref = normalize_preference(raw_pref if isinstance(raw_pref, dict) else {})
+        for key in ('cpu', 'memory', 'bandwidth'):
+            resolved_demand[key] = PREFERENCE_DEMAND[key][resolved_pref[key]]
+
+    return resolved_pref, resolved_demand
+
+
 DEFAULT_WEIGHT_PREFERENCE = float(os.getenv('SCORE_WEIGHT_PREFERENCE', '1.0'))
 DEFAULT_WEIGHT_BALANCE = float(os.getenv('SCORE_WEIGHT_BALANCE', '1.0'))
 
@@ -287,7 +346,7 @@ PREFERENCE_DEMAND = {
 }
 
 
-def select_node(resources, preference, weight_preference=DEFAULT_WEIGHT_PREFERENCE, weight_balance=DEFAULT_WEIGHT_BALANCE):
+def select_node(resources, preference, demand=None, weight_preference=DEFAULT_WEIGHT_PREFERENCE, weight_balance=DEFAULT_WEIGHT_BALANCE):
     weights = {'high': 3, 'medium': 2, 'low': 1}
     cpu_weight = weights[preference['cpu']]
     memory_weight = weights[preference['memory']]
@@ -362,9 +421,14 @@ def select_node(resources, preference, weight_preference=DEFAULT_WEIGHT_PREFEREN
             total_bw = 1_000_000_000.0
             free_bw = total_bw * (1.0 - usage)
 
-        req_cores = PREFERENCE_DEMAND['cpu'][preference['cpu']]
-        req_mem = PREFERENCE_DEMAND['memory'][preference['memory']]
-        req_bw = PREFERENCE_DEMAND['bandwidth'][preference['bandwidth']]
+        if demand and isinstance(demand, dict):
+            req_cores = float(demand.get('cpu', PREFERENCE_DEMAND['cpu'][preference['cpu']]))
+            req_mem = float(demand.get('memory', PREFERENCE_DEMAND['memory'][preference['memory']]))
+            req_bw = float(demand.get('bandwidth', PREFERENCE_DEMAND['bandwidth'][preference['bandwidth']]))
+        else:
+            req_cores = PREFERENCE_DEMAND['cpu'][preference['cpu']]
+            req_mem = PREFERENCE_DEMAND['memory'][preference['memory']]
+            req_bw = PREFERENCE_DEMAND['bandwidth'][preference['bandwidth']]
 
         # 80%安全上限での実効空き容量チェック:
         # 配置によって使用率が80%を超える場合 (実効空き量 < 要求量)、性能低下を招くため配置不可 (スコア 0)
@@ -396,9 +460,9 @@ def select_node(resources, preference, weight_preference=DEFAULT_WEIGHT_PREFEREN
     # ノード選択は従来通り preference_score (score関数) で決定
     selected = max(resources, key=score, default=None)
     if selected is not None:
-        LOG.info('Selected node: %s (preference_score: %.2f, balance_score: %.2f, combined_score: %.2f, preference: %s)',
+        LOG.info('Selected node: %s (preference_score: %.2f, balance_score: %.2f, combined_score: %.2f, preference: %s, demand: %s)',
                  selected['node_name'], score(selected), balance_score(selected),
-                 combined_score(selected), preference)
+                 combined_score(selected), preference, demand)
     return selected
 
 
@@ -546,13 +610,15 @@ class SeedClient:
 
     @tracer.start_as_current_span('manager.publish.function')
     async def create(self, node, name, runtime, code, requirements, zip_content=None, source_file=None,
-                     registerer_prefix=None):
+                     registerer_prefix=None, predicted_demand=None):
         request = {
             'type': 'CREATE', 'name': name, 'runtime': runtime,
             'requirements': requirements,
         }
         if registerer_prefix is not None:
             request['registerer_prefix'] = registerer_prefix
+        if predicted_demand is not None:
+            request['predicted_demand'] = predicted_demand
         if zip_content is not None:
             request['zip_content'] = await self.publisher.publish(
                 f'{self.upload_prefix}/{name.lstrip("/")}/package', zip_content)
@@ -642,7 +708,7 @@ class Manager:
             self.app.put_data(name, content=message.encode('utf-8'), freshness_period=freshness)
 
     async def register(self, request):
-        preference = normalize_preference(request.get('preference', {}))
+        preference, demand = resolve_resource_requirements(request)
         runtime = request.get('runtime')
         if not isinstance(runtime, str) or not runtime.strip():
             raise ValueError('runtime is required')
@@ -710,12 +776,13 @@ class Manager:
         with tracer.start_as_current_span('manager.collect.resources'):
             resources = await self.spy.collect_resources(candidate_nodes)
         with tracer.start_as_current_span('manager.select.node') as span:
-            node = select_node(resources, preference)['node_name']
+            node = select_node(resources, preference, demand=demand)['node_name']
             span.set_attribute('k8s.node.name', node)
         # **package is expanded so create() receives zip_content and source_file as arguments.
         response = await self.seed.create(
             node, request['name'], runtime, code, requirements,
-            registerer_prefix=request.get('registerer_prefix'), **package)
+            registerer_prefix=request.get('registerer_prefix'),
+            predicted_demand=demand, **package)
         return f'Success: Function resources created on {node}. Seed response: {response}'
 
     @tracer.start_as_current_span('manager.find.function')

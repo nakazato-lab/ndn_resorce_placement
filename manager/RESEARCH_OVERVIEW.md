@@ -721,3 +721,105 @@ Managerがコレクトした際、CPU・メモリ・帯域の間で取得タイ�
 - **ノードへの影響**:
   - 一般的な Kubernetes ノードの物理メモリ容量（4GB〜32GB等）と比較して、消費割合は **約 0.00003% 〜 0.0002%** です。
   - したがって、ノードの計算リソースやメモリを圧迫することは物理的にあり得ず、極めて軽量（ゼロ負荷に近い状態）で動作します。
+
+
+---
+
+## 8. 要求リソースの絶対値指定対応と再配置機能に向けたSeed連携プロトコル拡張
+
+> [!IMPORTANT]
+> 共同研究者による「配置後の予測リソースと実測リソースの乖離に基づく再配置機能」の実装に先立ち、Managerにおけるリソース要求受付とSeedへの予測要求リソース伝達プロトコルを拡張しました。
+
+---
+
+### 8.1. 課題と設計方針
+
+#### ① 二重入力の手間を排除するハイブリッドモデル
+- **課題**: 
+  Kubernetesのように絶対値（例: CPU 0.8コア、メモリ 1GiB）で要求リソースを指定したいユーザーに対して、`demand`（絶対値）と `preference`（low/medium/high）の両方を書かせるのは冗長であり、指定ミスやユーザーの手間を招く。
+- **方針**: 
+  基本は従来の `preference` だが、**`demand`（絶対値）が送られてきた場合は、Manager側でその絶対値が `high / medium / low` のどれに相当するかを自動判定（逆算マッピング）** する。ユーザーはどちらか一方のみを指定すればよい設計とした。
+
+#### ② 再配置機能（Re-placement）への予測基準値の伝達
+- **課題**: 
+  別担当者が開発する「再配置機能」では、Pod起動後の実際のリソース使用量と、「Managerが配置時に想定していた予測使用量」とを比較して乖離を検知する必要がある。しかし、従来のCREATE Interestには予測リソース量の絶対値が含まれていなかった。
+- **方針**: 
+  ManagerからSeedへ送るCREATE Interest（`/{node}/seed`）の `ApplicationParameters` に、配置計算で使用した確定要求リソース量 **`predicted_demand`（絶対値）** を含めて送信する。
+
+---
+
+### 8.2. 実装詳細
+
+#### ① 絶対値から優先度への自動マッピング（`infer_preference_level`）
+環境変数 `PREFERENCE_DEMAND` の基準値（low, medium, high）の中間値をしきい値として、入力された絶対値を自動判定する：
+
+- **CPU**（基準: low 0.2, medium 0.5, high 1.0 コア）:
+  - $\le 0.35$ コア $\to$ `low` (重み1)
+  - $0.35 \sim 0.75$ コア $\to$ `medium` (重み2)
+  - $> 0.75$ コア $\to$ `high` (重み3)
+- **メモリ**（基準: low 256MB, medium 512MB, high 1GB）:
+  - $\le 384$ MB $\to$ `low` / $384 \sim 768$ MB $\to$ `medium` / $> 768$ MB $\to$ `high`
+- **帯域**（基準: low 20Mbps, medium 50Mbps, high 100Mbps）:
+  - $\le 35$ Mbps $\to$ `low` / $35 \sim 75$ Mbps $\to$ `medium` / $> 75$ Mbps $\to$ `high`
+
+#### ② 要求リソースの総合解決（`resolve_resource_requirements`）
+- `demand` が指定された場合：
+  - 指定された絶対値をそのまま配置計算（`balance_score` や 80%安全上限判定）に使用。
+  - `preference` が未指定なら上記判定により自動設定（`preference_score` の加重平均重みに使用）。
+- `demand` が未指定の場合（従来通り）：
+  - `preference`（low/med/high）から `PREFERENCE_DEMAND` を引いて絶対値を算出。
+
+#### ③ Seedへの確定要求リソースの転送（`SeedClient.create`）
+- Managerはノード選定後、選定先ノードのSeedへ送るCREATE Interestの `ApplicationParameters` に `predicted_demand`（確定要求リソース量）を格納して送信。
+- これにより、Seed側はクライアントが `preference` と `demand` のどちらで指定したかに関わらず、**常に一貫した絶対値の予測リソース（CPUコア数, メモリBytes, 帯域bps）を受領できる**。
+
+---
+
+### 8.3. 通信パケット仕様（命名規則とフォーマット）
+
+#### 1. クライアント → Manager (`/Manager/register`)
+
+```json
+{
+  "name": "average",
+  "runtime": "python",
+  "requirements": [],
+  "code_ref": "/ndn-router-0/registerer/functions/average",
+  "registerer_prefix": "/ndn-router-0/registerer/functions/average/status",
+  
+  // パターンA: 抽象優先度指定 (従来互換)
+  "preference": {
+    "cpu": "high",
+    "memory": "medium",
+    "bandwidth": "low"
+  },
+
+  // パターンB: 絶対値要求指定 (新設)
+  // ※ demand 単体で指定可能 (Managerが自動的に preference を逆算)
+  "demand": {
+    "cpu": 0.8,
+    "memory": 1073741824,
+    "bandwidth": 50000000
+  }
+}
+```
+
+#### 2. Manager → Seed (`/{node}/seed`)
+
+```json
+{
+  "type": "CREATE",
+  "name": "average",
+  "runtime": "python",
+  "requirements": [],
+  "code_ref": "/ndn-router-0/manager/functions/average",
+  "registerer_prefix": "/ndn-router-0/registerer/functions/average/status",
+  
+  // ★ 再配置機能向けに付与される確定予測要求リソース
+  "predicted_demand": {
+    "cpu": 0.8,
+    "memory": 1073741824,
+    "bandwidth": 50000000
+  }
+}
+```
